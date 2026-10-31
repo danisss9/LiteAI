@@ -160,7 +160,9 @@ mkdir -p "${tmp}/src"
 tar -xzf "${tmp}/llamacpp.tar.gz" -C "${tmp}/src" --strip-components=1
 
 msg "configuring (GGML_CUDA=ON; architectures: ${CUDA_ARCHITECTURES})"
-cmake -S "${tmp}/src" -B "${tmp}/build" "${CMAKE_FLAGS[@]}"
+# -G Ninja: the container has ninja but no make, and Unix Makefiles is the
+# default generator.
+cmake -G Ninja -S "${tmp}/src" -B "${tmp}/build" "${CMAKE_FLAGS[@]}"
 
 msg "building (the long step)"
 cmake --build "${tmp}/build" -j"$(nproc)"

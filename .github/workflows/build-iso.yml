@@ -233,9 +233,9 @@ jobs:
       # The baked model puts the ISO past GitHub's 2 GiB release-asset limit on
       # purpose. Nothing fails: the image travels as a workflow artifact and the
       # release notes point at it (see the release job).
-      # The image travels as a workflow artifact (past the 2 GiB release-asset
-      # limit by design); the checksum and manifest go in a separate, small
-      # metadata artifact that the release job can attach to the release.
+      # The image travels as a workflow artifact too (handy without signing in
+      # to a release), but the release job attaches it to the release itself -
+      # the size guard below keeps it under GitHub's 2 GiB per-file limit.
       - name: Upload image
         uses: actions/upload-artifact@v7
         with:
@@ -252,6 +252,21 @@ jobs:
             out/*.sha256
             out/*.packages.txt
           retention-days: 14
+
+      # A release asset over 2 GiB is rejected by the uploads API with an HTTP
+      # 422 - which used to surface in the release job after both images had
+      # built. Failing here instead costs minutes and names the knob.
+      - name: Check the ISO fits a release asset
+        run: |
+          limit=$((2 * 1024 * 1024 * 1024))
+          for f in out/*.iso; do
+            size=$(stat -c%s "$f")
+            printf '%s: %s bytes (limit %s)\n' "$(basename "$f")" "$size" "$limit"
+            if (( size >= limit )); then
+              echo "::error::$(basename "$f") is $((size / 1048576)) MiB; GitHub rejects release assets of 2 GiB or more. Trim archiso/packages.x86_64 (firmware subpackages are the usual lever)."
+              exit 1
+            fi
+          done
 
   raspberrypi:
     name: Raspberry Pi image
@@ -356,10 +371,10 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          # Metadata only (checksums + package manifests). The images
-          # themselves are over the 2 GiB release-asset limit by design, stay
-          # workflow artifacts, and are linked from the release notes.
-          pattern: LiteAI-*-metadata
+          # The images themselves (each guarded to stay under the 2 GiB
+          # per-file release-asset limit) plus the checksums and manifests.
+          # The lowercase-named mcp artifact does not match this pattern.
+          pattern: LiteAI-*
           path: artifacts
           merge-multiple: true
 
@@ -367,7 +382,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           ls -lh artifacts
 
@@ -383,21 +397,13 @@ jobs:
           agent, running on a local Qwen2.5-Coder model served by llama.cpp. No
           desktop, no GUI: the terminal is the computer.
 
-          | Image | For |
+          | Download | For |
           | --- | --- |
           | \`LiteAI-${VERSION}-x86_64.iso\` | PCs - UEFI (x64 and ia32) and legacy BIOS |
           | \`LiteAI-${VERSION}-aarch64-rpi.img.xz\` | 64-bit Raspberry Pi - Pi 5, 4, 400, CM4, 3 and Zero 2 W |
 
-          ## Downloads
-
-          Both images are larger than GitHub's 2 GiB release-asset limit (the
-          baked model is the point), so they attach to the build workflow
-          instead of this release:
-
-          **Download them from the build run: ${RUN_URL}**
-
-          The \`.sha256\` and \`.packages.txt\` files attached below verify what
-          that run produced.
+          Both images carry the baked model and stay just under GitHub's 2 GiB
+          per-file release-asset limit; the \`.sha256\` files verify them.
 
           ## PCs
 
@@ -405,6 +411,7 @@ jobs:
           burned CD/DVD.
 
           \`\`\`bash
+          sha256sum -c LiteAI-${VERSION}-x86_64.iso.sha256
           sudo dd if=LiteAI-${VERSION}-x86_64.iso of=/dev/sdX bs=4M status=progress oflag=sync
           \`\`\`
 
@@ -419,6 +426,7 @@ jobs:
           ("Use custom" -> select the .img.xz), or:
 
           \`\`\`bash
+          sha256sum -c LiteAI-${VERSION}-aarch64-rpi.img.xz.sha256
           xz -dc LiteAI-${VERSION}-aarch64-rpi.img.xz | sudo dd of=/dev/sdX bs=4M status=progress oflag=sync
           \`\`\`
 
@@ -438,13 +446,6 @@ jobs:
           machine. Both images are built from the current Arch Linux (and Arch
           Linux ARM) repositories on the day they are built; the \`.packages.txt\`
           file beside each image lists exactly what that build shipped.
-
-          ## Verifying a download
-
-          \`\`\`bash
-          sha256sum -c LiteAI-${VERSION}-x86_64.iso.sha256
-          sha256sum -c LiteAI-${VERSION}-aarch64-rpi.img.xz.sha256
-          \`\`\`
           EOF
 
           gh release create "${GITHUB_REF_NAME}" \

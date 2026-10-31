@@ -67,10 +67,11 @@ result.
 | `LiteAI-<version>-x86_64.iso` | PCs (UEFI x64/ia32, legacy BIOS) | live medium; `sudo liteai-install` puts the same system on a disk, offline |
 | `LiteAI-<version>-aarch64-rpi.img.xz` | Raspberry Pi 5/4/400/CM4/3/Zero 2 W | the flashed card *is* the system; rootfs expands on first boot |
 
-Both bake the same model and ship the same AI stack. The ISO lands around
-3 GB and the Pi image unpacks to 8 GiB (use a 16 GB card); both are larger
-than GitHub's 2 GiB release-asset limit, so releases link to the build's
-workflow artifacts and attach checksums and package manifests instead.
+Both bake the same model and ship the same AI stack. The ISO comes in just
+under GitHub's 2 GiB per-file release-asset limit - the firmware subpackage
+list is trimmed to make room for the model - and the compressed Pi image fits
+too, so both attach to the release directly. The Pi image unpacks to 8 GiB:
+use a 16 GB card or larger.
 
 Default credentials: the PC live medium autologins as `liteai` with no
 password (root is likewise passwordless, like the official Arch medium) and

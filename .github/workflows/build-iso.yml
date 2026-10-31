@@ -233,15 +233,25 @@ jobs:
       # The baked model puts the ISO past GitHub's 2 GiB release-asset limit on
       # purpose. Nothing fails: the image travels as a workflow artifact and the
       # release notes point at it (see the release job).
-      - uses: actions/upload-artifact@v7
+      # The image travels as a workflow artifact (past the 2 GiB release-asset
+      # limit by design); the checksum and manifest go in a separate, small
+      # metadata artifact that the release job can attach to the release.
+      - name: Upload image
+        uses: actions/upload-artifact@v7
         with:
           name: LiteAI-${{ needs.version.outputs.version }}-x86_64
+          path: out/*.iso
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v7
+        with:
+          name: LiteAI-${{ needs.version.outputs.version }}-x86_64-metadata
           path: |
-            out/*.iso
             out/*.sha256
             out/*.packages.txt
           retention-days: 14
-          compression-level: 0
 
   raspberrypi:
     name: Raspberry Pi image
@@ -318,15 +328,22 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v7
+      - name: Upload image
+        uses: actions/upload-artifact@v7
         with:
           name: LiteAI-${{ needs.version.outputs.version }}-raspberrypi
+          path: out/*.img.xz
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v7
+        with:
+          name: LiteAI-${{ needs.version.outputs.version }}-raspberrypi-metadata
           path: |
-            out/*.img.xz
             out/*.sha256
             out/*.packages.txt
           retention-days: 14
-          compression-level: 0
 
   release:
     name: Publish release
@@ -339,9 +356,10 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          # Checksums and manifests only - the images themselves are over the
-          # 2 GiB release-asset limit by design and stay workflow artifacts.
-          pattern: LiteAI-*
+          # Metadata only (checksums + package manifests). The images
+          # themselves are over the 2 GiB release-asset limit by design, stay
+          # workflow artifacts, and are linked from the release notes.
+          pattern: LiteAI-*-metadata
           path: artifacts
           merge-multiple: true
 
@@ -352,6 +370,13 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           ls -lh artifacts
+
+          # A previous attempt at this tag may have created the release before
+          # failing on an asset upload; start clean rather than fight the
+          # already_exists error. The tag itself is left alone.
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release delete "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --yes
+          fi
 
           cat > release-notes.md <<EOF
           A minimal Arch Linux system that boots straight into **pi**, the coding

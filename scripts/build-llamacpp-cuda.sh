@@ -39,6 +39,9 @@ readonly CMAKE_FLAGS=(
     -DCMAKE_INSTALL_RPATH='$ORIGIN;$ORIGIN/../lib'
     -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}"
     -DCMAKE_CUDA_RUNTIME_LIBRARY=Static
+    # Arch installs the toolkit under /opt/cuda, which is neither on the
+    # default PATH nor in CMake's search path in a non-login shell.
+    -DCUDAToolkit_ROOT=/opt/cuda
     -DGGML_CUDA=ON
     # A fixed baseline CPU build: the GPU is the point of this variant and
     # the CPU side is only its fallback, but it must run on any x86-64 host.
@@ -161,7 +164,9 @@ tar -xzf "${tmp}/llamacpp.tar.gz" -C "${tmp}/src" --strip-components=1
 
 msg "configuring (GGML_CUDA=ON; architectures: ${CUDA_ARCHITECTURES})"
 # -G Ninja: the container has ninja but no make, and Unix Makefiles is the
-# default generator.
+# default generator. nvcc on PATH too: nvcc's host-compiler handling and
+# CMake's checks both want to find it as a plain command.
+export PATH="/opt/cuda/bin:${PATH}"
 cmake -G Ninja -S "${tmp}/src" -B "${tmp}/build" "${CMAKE_FLAGS[@]}"
 
 msg "building (the long step)"

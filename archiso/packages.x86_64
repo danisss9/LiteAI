@@ -9,15 +9,17 @@ linux
 # Dropped: qcom (Snapdragon SoC - phones/ARM laptops), mellanox, qlogic, nfp and
 # liquidio (datacenter NICs and Fibre Channel HBAs), other (the long tail of
 # obscure devices; the common Wi-Fi families below are kept), marvell (legacy
-# laptop Wi-Fi) and cirrus (laptop smart-amp DSP - a headless box has no speakers).
+# laptop Wi-Fi), cirrus (laptop smart-amp DSP - a headless box has no speakers),
+# broadcom (mostly pre-2015 laptop Wi-Fi), and the GPU families entirely:
+# amdgpu, radeon and nvidia. There is no Xorg here to accelerate - without
+# their firmware the GPU drivers fail to load and the kernel falls back to
+# simpledrm/efifb, which drives the text console fine. Anyone attaching a
+# display or building GPU llama.cpp installs the matching subpackage first:
+#     sudo pacman -S linux-firmware-amdgpu   # (or -nvidia / -radeon)
 linux-firmware-intel
 linux-firmware-atheros
 linux-firmware-realtek
 linux-firmware-mediatek
-linux-firmware-broadcom
-linux-firmware-amdgpu
-linux-firmware-radeon
-linux-firmware-nvidia
 intel-ucode
 amd-ucode
 mkinitcpio
@@ -73,7 +75,6 @@ git
 python
 python-pip
 man-db
-man-pages
 less
 nano
 vim

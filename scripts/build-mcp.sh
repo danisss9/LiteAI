@@ -27,10 +27,20 @@ done
 [[ -n "${STAGE}" ]] || { echo "usage: build-mcp.sh -o <staging-dir>" >&2; exit 1; }
 
 if [[ -n "${LITEAI_MCP_PREBUILT:-}" ]]; then
-    # CI hand-off: the mcp job already built and tested this exact tree.
+    # CI hand-off: the mcp job already built and tested this exact tree. Accept
+    # the file itself, a directory holding it at its root, or the staged tree
+    # layout this script produces (usr/share/liteai/mcp/server.cjs).
     echo "==> using prebuilt MCP server from ${LITEAI_MCP_PREBUILT}"
-    install -Dm0644 "${LITEAI_MCP_PREBUILT}/server.cjs" \
-        "${STAGE}/usr/share/liteai/mcp/server.cjs"
+    src=""
+    if [[ -f "${LITEAI_MCP_PREBUILT}" ]]; then
+        src="${LITEAI_MCP_PREBUILT}"
+    elif [[ -f "${LITEAI_MCP_PREBUILT}/server.cjs" ]]; then
+        src="${LITEAI_MCP_PREBUILT}/server.cjs"
+    else
+        src="$(find "${LITEAI_MCP_PREBUILT}" -type f -name server.cjs -print -quit 2>/dev/null || true)"
+    fi
+    [[ -n "${src}" ]] || { echo "no server.cjs found under ${LITEAI_MCP_PREBUILT}" >&2; exit 1; }
+    install -Dm0644 "${src}" "${STAGE}/usr/share/liteai/mcp/server.cjs"
     exit 0
 fi
 

@@ -421,7 +421,14 @@ staging="${WORK_DIR}/overlay"
 rm -rf "${staging}"
 cp -a "${ROOTFS_COMMON}" "${staging}"
 rm -f "${staging}"/etc/{passwd,shadow,group,gshadow}
-cp -a "${staging}/." "${ROOT_MNT}/"
+# --remove-destination matters: the base image already carries preset-created
+# enablement symlinks at some of these paths (systemd-timesyncd, NetworkManager),
+# and cp follows destination symlinks - through a valid one it would overwrite
+# the packaged unit file with the stub's text, and at a dangling one it simply
+# fails. Removing the destination first lands our stubs as plain files, which
+# the normalisation step below turns into real symlinks once every overlay is
+# in place.
+cp -a --remove-destination "${staging}/." "${ROOT_MNT}/"
 rm -rf "${staging}"
 
 # polkit grants `pkexec /usr/local/bin/liteai-*` without a password, so those
@@ -431,30 +438,8 @@ rm -rf "${staging}"
 chown 0:0 "${ROOT_MNT}/usr/local/bin/"liteai-*
 chmod 0755 "${ROOT_MNT}/usr/local/bin/"liteai-*
 
-# The repository is edited on machines whose filesystems cannot hold symlinks
-# (Windows), where each entry in a .wants directory degrades into a plain file
-# containing the target path. systemd follows only symlinks there, so rebuild
-# every such entry for real inside the image.
-msg "normalising systemd enablement symlinks"
-while IFS= read -r -d '' entry; do
-    [[ -f "${entry}" && ! -L "${entry}" ]] || continue
-    target="$(cat "${entry}")"
-    # A real enablement entry is one line naming a unit under /usr/lib or
-    # /etc; anything else is just a file that happens to live there.
-    [[ "${target}" == /* && ! "${target}" == *$'\n'* ]] || continue
-    rm -f "${entry}"
-    ln -s "${target}" "${entry}"
-    msg "  relinked ${entry#"${ROOT_MNT}/"} -> ${target}"
-done < <(find "${ROOT_MNT}/etc/systemd/system" -type f -print0)
-
-# The model server is the reason this image exists; make sure it is enabled
-# regardless of what state the source tree's wants entries arrived in.
-mkdir -p "${ROOT_MNT}/etc/systemd/system/multi-user.target.wants"
-ln -sfn /usr/lib/systemd/system/liteai-llama.service \
-    "${ROOT_MNT}/etc/systemd/system/multi-user.target.wants/liteai-llama.service"
-
 msg "applying the Raspberry Pi overlay"
-cp -a "${RPI_DIR}/overlay/." "${ROOT_MNT}/"
+cp -a --remove-destination "${RPI_DIR}/overlay/." "${ROOT_MNT}/"
 install -Dm0644 "${RPI_DIR}/boot/config.txt"  "${ROOT_MNT}/boot/config.txt"
 install -Dm0644 "${RPI_DIR}/boot/cmdline.txt" "${ROOT_MNT}/boot/cmdline.txt"
 
@@ -475,6 +460,30 @@ install -Dm0440 /dev/stdin "${ROOT_MNT}/etc/sudoers.d/liteai" <<'SUDOERS'
 # LiteAI: members of wheel may use sudo with their own password.
 %wheel ALL=(ALL:ALL) ALL
 SUDOERS
+
+# The repository is edited on machines whose filesystems cannot hold symlinks
+# (Windows), where each entry in a .wants directory degrades into a plain file
+# containing the target path. systemd follows only symlinks there, so rebuild
+# every such entry for real inside the image. This runs after BOTH overlays -
+# the Pi overlay adds entries of its own - so nothing is normalised twice or
+# left behind as a plain file systemd would ignore.
+msg "normalising systemd enablement symlinks"
+while IFS= read -r -d '' entry; do
+    [[ -f "${entry}" && ! -L "${entry}" ]] || continue
+    target="$(cat "${entry}")"
+    # A real enablement entry is one line naming a unit under /usr/lib or
+    # /etc; anything else is just a file that happens to live there.
+    [[ "${target}" == /* && ! "${target}" == *$'\n'* ]] || continue
+    rm -f "${entry}"
+    ln -s "${target}" "${entry}"
+    msg "  relinked ${entry#"${ROOT_MNT}/"} -> ${target}"
+done < <(find "${ROOT_MNT}/etc/systemd/system" -type f -print0)
+
+# The model server is the reason this image exists; make sure it is enabled
+# regardless of what state the source tree's wants entries arrived in.
+mkdir -p "${ROOT_MNT}/etc/systemd/system/multi-user.target.wants"
+ln -sfn /usr/lib/systemd/system/liteai-llama.service \
+    "${ROOT_MNT}/etc/systemd/system/multi-user.target.wants/liteai-llama.service"
 
 # --------------------------------------------------------------------------
 # accounts, locale, AI stack

@@ -6,15 +6,18 @@ name: Build images
 #     git tag v1.0.0 && git push origin v1.0.0
 #
 #   * LiteAI-<version>-x86_64.iso         - PCs (UEFI x64/ia32 and legacy BIOS)
+#   * LiteAI-<version>-x86_64-cuda.iso    - PCs with an NVIDIA Turing-or-newer GPU
 #   * LiteAI-<version>-aarch64-rpi.img.xz - 64-bit Raspberry Pi boards
 #
 # The workflow can also be run by hand from the Actions tab, which uploads the
 # images as build artifacts without touching releases.
 #
-# The baked model pushes both artifacts past GitHub's 2 GiB release-asset
-# limit, so release builds attach the checksums and package manifests and
-# upload the images themselves as workflow artifacts (downloadable from the
-# run page for 14 days; raise retention or mirror them externally as needed).
+# The baked model puts the images at GitHub's 2 GiB release-asset limit: the
+# standard x86_64 and RPi images are trimmed to just under it, but the CUDA
+# ISO (NVIDIA driver + CUDA llama.cpp on top) is not. It always travels as a
+# workflow artifact (downloadable from the run page for 14 days; raise
+# retention or mirror them externally as needed), and the release job links
+# to it instead of attaching it.
 #
 # Pull requests run the `mcp` job and nothing else. It takes a couple of
 # minutes and is the only part of a build that can fail on a code mistake
@@ -31,7 +34,7 @@ on:
       targets:
         description: 'Which images to build'
         type: choice
-        options: [both, x86_64, raspberrypi]
+        options: [all, both, x86_64, x86_64-cuda, raspberrypi]
         default: both
       pi_version:
         description: 'pi version to bundle ("pinned" uses the version in scripts/fetch-pi.sh)'
@@ -115,7 +118,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request'
       && (github.event_name != 'workflow_dispatch'
-          || contains(fromJSON('["both","x86_64"]'), github.event.inputs.targets))
+          || contains(fromJSON('["both","x86_64","all"]'), github.event.inputs.targets))
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -268,13 +271,152 @@ jobs:
             fi
           done
 
+  x86_64-cuda:
+    name: x86-64 CUDA ISO
+    needs: [version, mcp]
+    if: >-
+      github.event_name != 'pull_request'
+      && (github.event_name != 'workflow_dispatch'
+          || contains(fromJSON('["x86_64-cuda","all"]'), github.event.inputs.targets))
+    runs-on: ubuntu-latest
+    # The CUDA toolkit install plus a seven-architecture llama.cpp compile on
+    # top of the standard ISO build.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Fetch the prebuilt MCP server
+        uses: actions/download-artifact@v8
+        with:
+          name: liteai-mcp-server
+          path: mcp-dist
+
+      - name: Cache the baked model
+        uses: actions/cache@v4
+        with:
+          path: model-cache
+          key: liteai-model-${{ hashFiles('scripts/fetch-model.sh') }}-v1
+
+      - name: Free up disk space
+        run: |
+          echo "before:"; df -h / /mnt | tail -2
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/.ghcup \
+                      /usr/share/swift /usr/local/share/powershell \
+                      "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}"
+          sudo docker image prune --all --force || true
+          # The build tree (pacstrap root + squashfs) goes on /mnt, the roomy
+          # ephemeral disk; only the finished ISO lands on /.
+          sudo mkdir -p /mnt/liteai-work
+          sudo chmod 0777 /mnt/liteai-work
+          echo "after:"; df -h / /mnt | tail -2
+
+      - name: Build the ISO
+        # Same privileged container as the standard ISO; the CUDA script
+        # installs the toolkit into it (and removes it again) itself.
+        env:
+          BUILD_VERSION: ${{ needs.version.outputs.version }}
+          PI_VERSION: ${{ needs.version.outputs.pi_version }}
+        run: |
+          # Only point the build at the cached model when it is actually
+          # there; fetch-model.sh refuses a configured-but-missing source.
+          model_env=()
+          if [[ -f model-cache/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf ]]; then
+            echo "using the cached model"
+            model_env=(-e LITEAI_MODEL_SRC=/build/model-cache/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf)
+          fi
+          docker run --rm --privileged --pull always \
+            -v "${PWD}:/build" \
+            -v /mnt/liteai-work:/work \
+            -w /build \
+            -e ISO_VERSION="${BUILD_VERSION}" \
+            -e LITEAI_PI_VERSION="${PI_VERSION}" \
+            -e LITEAI_MCP_PREBUILT=/build/mcp-dist \
+            "${model_env[@]}" \
+            archlinux:latest \
+            bash -euo pipefail -c '
+              # The keyring goes first and on its own: a base image older
+              # than the current signing keys cannot verify what follows.
+              pacman -Sy --noconfirm --needed archlinux-keyring
+              pacman -Syu --noconfirm --needed archiso git grub nodejs npm
+              git config --global --add safe.directory /build
+              ./scripts/build-iso.sh --variant cuda -v "${ISO_VERSION}" -w /work -o /build/out
+            '
+
+      - name: Keep a copy of the model for the cache
+        if: always()
+        run: |
+          src=$(sudo find /mnt/liteai-work/profile/airootfs/var/lib/liteai/models \
+                     -name '*.gguf' 2>/dev/null | head -1 || true)
+          if [ -n "$src" ]; then
+            mkdir -p model-cache
+            sudo cp "$src" model-cache/
+            sudo chown -R "$(id -u):$(id -g)" model-cache
+          fi
+
+      - name: Summarise
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" out
+          {
+            echo "### x86-64 CUDA ISO"
+            echo '| File | Size | SHA-256 |'
+            echo '| --- | --- | --- |'
+            for f in out/*.iso; do
+              printf '| `%s` | %s | `%s` |\n' \
+                "$(basename "$f")" "$(du -h "$f" | cut -f1)" "$(sha256sum "$f" | cut -d' ' -f1)"
+            done
+            for m in out/*.packages.txt; do
+              [ -e "$m" ] || continue
+              echo
+              echo "<details><summary>Shipped package versions ($(wc -l < "$m") packages)</summary>"
+              echo
+              ./scripts/pkg-versions.sh "$m" --markdown
+              echo
+              echo '</details>'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload image
+        uses: actions/upload-artifact@v7
+        with:
+          name: LiteAI-${{ needs.version.outputs.version }}-x86_64-cuda
+          path: out/*.iso
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v7
+        with:
+          name: LiteAI-${{ needs.version.outputs.version }}-x86_64-cuda-metadata
+          path: |
+            out/*.sha256
+            out/*.packages.txt
+          retention-days: 14
+
+      - name: Check the ISO size is sane
+        run: |
+          # The CUDA ISO intentionally exceeds GitHub's 2 GiB release-asset
+          # limit (driver + CUDA runtime + kernels on top of the baked
+          # model); it ships as a workflow artifact and the release job
+          # links to it. 4 GiB is a sanity cap, not a product requirement: a
+          # build past it means something stopped being trimmed.
+          limit=$((4 * 1024 * 1024 * 1024))
+          for f in out/*.iso; do
+            size=$(stat -c%s "$f")
+            printf '%s: %s bytes (sanity cap %s)\n' "$(basename "$f")" "$size" "$limit"
+            if (( size >= limit )); then
+              echo "::error::$(basename "$f") is $((size / 1048576)) MiB - over the 4 GiB sanity cap. Check the nvidia-utils trim and the firmware package list."
+              exit 1
+            fi
+          done
+
   raspberrypi:
     name: Raspberry Pi image
     needs: [version, mcp]
     if: >-
       github.event_name != 'pull_request'
       && (github.event_name != 'workflow_dispatch'
-          || contains(fromJSON('["both","raspberrypi"]'), github.event.inputs.targets))
+          || contains(fromJSON('["both","raspberrypi","all"]'), github.event.inputs.targets))
     # A native aarch64 runner means the build can chroot into the image
     # directly instead of emulating every command through qemu.
     runs-on: ubuntu-24.04-arm
@@ -371,12 +513,37 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          # The images themselves (each guarded to stay under the 2 GiB
-          # per-file release-asset limit) plus the checksums and manifests.
-          # The lowercase-named mcp artifact does not match this pattern.
+          # The images (the standard ones guarded to stay under the 2 GiB
+          # per-file release-asset limit; the CUDA ISO is set aside below)
+          # plus the checksums and manifests. The lowercase-named mcp
+          # artifact does not match this pattern.
           pattern: LiteAI-*
           path: artifacts
           merge-multiple: true
+
+      - name: Set aside the oversized CUDA ISO
+        id: cuda_iso
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # GitHub rejects release assets of 2 GiB or more (HTTP 422 at
+          # upload time), and the CUDA ISO - driver, CUDA llama.cpp and the
+          # baked model on top of the standard image - is expected to exceed
+          # that. Park it outside the artifacts directory so the publish
+          # step cannot pick it up; the notes point at the workflow
+          # artifacts instead.
+          iso="artifacts/LiteAI-${VERSION}-x86_64-cuda.iso"
+          limit=$((2 * 1024 * 1024 * 1024))
+          if [[ -f "${iso}" ]] && (( $(stat -c%s "${iso}") >= limit )); then
+            mkdir -p too-big
+            mv "${iso}" too-big/
+            rm -f "artifacts/LiteAI-${VERSION}-x86_64-cuda.iso.sha256"
+            echo "state=too-big" >> "$GITHUB_OUTPUT"
+          elif [[ -f "${iso}" ]]; then
+            echo "state=attach" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=absent" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Publish
         env:
@@ -392,18 +559,34 @@ jobs:
             gh release delete "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --yes
           fi
 
+          # The CUDA variant gets a table row when it fits a release asset,
+          # and a pointer at the workflow artifacts when it does not.
+          table='| Download | For |
+          | --- | --- |
+          | `LiteAI-'"${VERSION}"'-x86_64.iso` | PCs - UEFI (x64 and ia32) and legacy BIOS |
+          | `LiteAI-'"${VERSION}"'-aarch64-rpi.img.xz` | 64-bit Raspberry Pi - Pi 5, 4, 400, CM4, 3 and Zero 2 W |'
+          cuda_note=""
+          case "${{ steps.cuda_iso.outputs.state }}" in
+            attach)
+              table="${table}
+          | `LiteAI-'"${VERSION}"'-x86_64-cuda.iso` | PCs with an NVIDIA Turing (2016) or newer GPU - llama.cpp compiled for CUDA |"
+              ;;
+            *)
+              cuda_note="The CUDA variant of the PC image (NVIDIA Turing or newer, llama.cpp compiled for CUDA with GPU offload enabled by default) did not attach to this release - either it did not build, or, as usual, it was too large for a release asset. Download \`LiteAI-${VERSION}-x86_64-cuda.iso\` from the artifacts of the workflow run that produced this release (Actions -> Build images -> this run)."
+              ;;
+          esac
+
           cat > release-notes.md <<EOF
           A minimal Arch Linux system that boots straight into **pi**, the coding
           agent, running on a local Qwen2.5-Coder model served by llama.cpp. No
           desktop, no GUI: the terminal is the computer.
 
-          | Download | For |
-          | --- | --- |
-          | \`LiteAI-${VERSION}-x86_64.iso\` | PCs - UEFI (x64 and ia32) and legacy BIOS |
-          | \`LiteAI-${VERSION}-aarch64-rpi.img.xz\` | 64-bit Raspberry Pi - Pi 5, 4, 400, CM4, 3 and Zero 2 W |
+          ${table}
 
-          Both images carry the baked model and stay just under GitHub's 2 GiB
+          The images carry the baked model and stay just under GitHub's 2 GiB
           per-file release-asset limit; the \`.sha256\` files verify them.
+
+          ${cuda_note}
 
           ## PCs
 
@@ -440,7 +623,9 @@ jobs:
 
           ## What is inside
 
-          llama.cpp (prebuilt upstream binary), pi (\`@earendil-works/pi-coding-agent\`),
+          llama.cpp (prebuilt upstream CPU binary; the CUDA ISO builds the
+          same pin from source with CUDA enabled), pi
+          (\`@earendil-works/pi-coding-agent\`),
           the baked \`qwen2.5-coder-1.5b-instruct-q4_k_m\` model, and the LiteAI
           MCP server that lets pi manage llama.cpp, its models, itself and the
           machine. Both images are built from the current Arch Linux (and Arch

@@ -1,0 +1,14 @@
+# Extra packages for the CUDA ISO variant; build-iso.sh --variant cuda
+# appends this file to packages.x86_64 when staging the profile.
+#
+# nvidia-open is the prebuilt open kernel-module package for the stock
+# 'linux' kernel (the proprietary 'nvidia' package was retired upstream in
+# its favour; both support Turing and newer, which is also CUDA 13's floor).
+# nvidia-utils is the driver userspace - build-iso.sh injects NoExtract lines
+# that keep its display-only libraries out of this console-only image.
+# linux-firmware-nvidia is the GPU firmware family the standard package list
+# drops on purpose (see the comment there); the CUDA image has a real use
+# for it.
+nvidia-open
+nvidia-utils
+linux-firmware-nvidia

@@ -5,7 +5,7 @@
 # installed. The GitHub Actions workflow does exactly that; see the README for
 # the one-liner to reproduce a build locally.
 #
-# Usage: sudo scripts/build-iso.sh [-o out-dir] [-w work-dir] [-v version]
+# Usage: sudo scripts/build-iso.sh [--variant cpu|cuda] [-o out-dir] [-w work-dir] [-v version]
 
 set -Eeuo pipefail
 
@@ -17,6 +17,7 @@ readonly ROOTFS_COMMON="${REPO_ROOT}/rootfs-common"
 OUT_DIR="${REPO_ROOT}/out"
 WORK_DIR="${REPO_ROOT}/work"
 BUILD_VERSION="${ISO_VERSION:-$(date +%Y.%m.%d)}"
+VARIANT="cpu"
 
 msg()  { printf '\e[38;5;39m==>\e[0m %s\n' "$*"; }
 die()  { printf '\e[38;5;203merror\e[0m %s\n' "$*" >&2; exit 1; }
@@ -26,6 +27,7 @@ while (( $# )); do
         -o|--out)     OUT_DIR="$2"; shift 2 ;;
         -w|--work)    WORK_DIR="$2"; shift 2 ;;
         -v|--version) BUILD_VERSION="$2"; shift 2 ;;
+        --variant)    VARIANT="$2"; shift 2 ;;
         -h|--help)    sed -n '2,9p' "$0"; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
@@ -33,6 +35,11 @@ done
 
 OUT_DIR="$(readlink -m -- "${OUT_DIR}")"
 WORK_DIR="$(readlink -m -- "${WORK_DIR}")"
+
+case "${VARIANT}" in
+    cpu|cuda) ;;
+    *) die "unknown variant: ${VARIANT} (use cpu or cuda)" ;;
+esac
 
 (( EUID == 0 )) || die "this build must run as root (mkarchiso needs it)"
 command -v mkarchiso >/dev/null || die "mkarchiso not found - install the 'archiso' package"
@@ -81,6 +88,79 @@ cp -a "${PROFILE_SRC}/." "${PROFILE}/"
 install -d -m 0755 "${PROFILE}/airootfs"
 cp -a "${ROOTFS_COMMON}/." "${PROFILE}/airootfs/"
 
+# The CUDA variant layers the NVIDIA stack onto the standard one: extra
+# packages, a small overlay (module loading, the loader path for the bundled
+# CUDA runtime) and the NoExtract trims below - all applied to the staged
+# profile only, so archiso/ stays the shared source of truth.
+readonly -a NVIDIA_TRIM=(
+    # GLX/EGL/GLES and their engines - there is no graphics stack to feed
+    usr/lib/libGLX_nvidia.so*
+    usr/lib/libEGL_nvidia.so*
+    usr/lib/libGLESv1_CM_nvidia.so*
+    usr/lib/libGLESv2_nvidia.so*
+    usr/lib/libnvidia-glcore.so*
+    usr/lib/libnvidia-eglcore.so*
+    usr/lib/libnvidia-glsi.so*
+    usr/lib/libnvidia-glvkspirv.so*
+    usr/lib/libnvidia-rtcore.so*
+    usr/lib/libnvoptix.so*
+    usr/lib/libnvidia-gpucomp.so*
+    # GBM/VDPAU display and video-surface paths
+    usr/lib/nvidia-drm_gbm.so
+    usr/lib/libvdpau_nvidia.so*
+    # NVENC/NVDEC - no video pipeline in the image
+    usr/lib/libnvidia-encode.so*
+    usr/lib/libnvcuvid.so*
+    usr/lib/libnvidia-fbc.so*
+    usr/lib/libnvidia-opticalflow.so*
+    # Vulkan-SC, DLSS/Proton, confidential compute, datacenter fabric
+    usr/lib/libnvidia-vksc-core.so*
+    usr/lib/libnvidia-pkcs11.so*
+    usr/lib/libnvidia-pkcs11-openssl3.so*
+    usr/lib/libnvidia-ngx.so*
+    usr/lib/libnvidia-imex.so*
+    usr/lib/libnvidia-fmdrv.so*
+    usr/lib/libnvidia-tileiras.so*
+    usr/lib/libnvidia-sandboxutils.so*
+    usr/lib/libnvidia-present.so*
+    usr/lib/libcudadebugger.so*
+    # Xorg module, Wine/Proton shims, the X-only tool
+    usr/lib/nvidia/xorg/*
+    usr/lib/nvidia/wine/*
+    usr/bin/nvidia-xconfig
+    # Vulkan ICDs, GL application profiles, docs, Xorg outputclass config
+    usr/share/vulkan/*
+    usr/share/nvidia/*
+    usr/share/X11/xorg.conf.d/nvidia-drm-outputclass.conf
+)
+
+if [[ "${VARIANT}" == "cuda" ]]; then
+    msg "applying the CUDA variant"
+    cp -a "${REPO_ROOT}/archiso/airootfs-cuda/." "${PROFILE}/airootfs/"
+    cat "${REPO_ROOT}/archiso/packages-cuda.x86_64" >> "${PROFILE}/packages.x86_64"
+
+    # nvidia-utils is ~950 MB and mostly display stack this image cannot
+    # use; NoExtract makes pacstrap skip those files outright. Everything on
+    # the CUDA/driver path (libcuda, NVML, the PTX JIT compiler, GSP
+    # firmware, nvidia-smi) stays, and build-llamacpp-cuda.sh --verify
+    # checks exactly that after the build.
+    for pattern in "${NVIDIA_TRIM[@]}"; do
+        sed -i "/^\[options\]$/a NoExtract = ${pattern}" "${PROFILE}/pacman.conf"
+    done
+    grep -q '^NoExtract' "${PROFILE}/pacman.conf" ||
+        die "NoExtract trims were not applied to the staged pacman.conf"
+
+    # Same llama.cpp pin, built for CUDA; GPU offload on by default. On a
+    # machine without a supported NVIDIA GPU the CUDA backend finds no
+    # device, llama.cpp falls back to CPU, and the flag is ignored.
+    sed -i 's/^EXTRA_ARGS=$/EXTRA_ARGS=-ngl 99/' "${PROFILE}/airootfs/etc/liteai/llama.conf"
+
+    sed -i \
+        -e 's/^iso_name="liteai"$/iso_name="liteai-cuda"/' \
+        -e 's/^iso_application="LiteAI Live\/Install Medium"$/iso_application="LiteAI CUDA Live\/Install Medium"/' \
+        "${PROFILE}/profiledef.sh"
+fi
+
 # Boot menus come from the archiso release we are building against, so they
 # always match the tooling's expectations; only the branding is ours.
 msg "importing boot loader configuration from archiso ${RELENG##*/}"
@@ -92,6 +172,11 @@ find "${PROFILE}"/{syslinux,grub,efiboot} -type f \( -name '*.cfg' -o -name '*.c
         -e 's/Arch Linux install medium/LiteAI/g' \
         -e 's/Arch Linux/LiteAI/g' \
         -e 's/Arch menu/LiteAI menu/g'
+
+if [[ "${VARIANT}" == "cuda" ]]; then
+    find "${PROFILE}"/{syslinux,grub,efiboot} -type f \( -name '*.cfg' -o -name '*.conf' \) -print0 2>/dev/null |
+        xargs -0 --no-run-if-empty sed -i 's/LiteAI/LiteAI CUDA/g'
+fi
 
 # --------------------------------------------------------------------------
 # make the enablement symlinks real
@@ -130,8 +215,15 @@ ln -sfn /usr/lib/systemd/system/liteai-llama.service \
 # stage the AI stack: llama.cpp, the model, pi and the MCP server
 # --------------------------------------------------------------------------
 
-msg "staging llama.cpp"
-"${REPO_ROOT}/scripts/fetch-llamacpp.sh" "${PROFILE}/airootfs" x64
+msg "staging llama.cpp (${VARIANT})"
+if [[ "${VARIANT}" == "cuda" ]]; then
+    "${REPO_ROOT}/scripts/build-llamacpp-cuda.sh" "${PROFILE}/airootfs"
+    # No ldconfig here: the loader cache is regenerated by pacstrap's glibc
+    # hook after mkarchiso copies this tree in - with the overlay's
+    # /etc/ld.so.conf.d/liteai-llamacpp.conf already in place.
+else
+    "${REPO_ROOT}/scripts/fetch-llamacpp.sh" "${PROFILE}/airootfs" x64
+fi
 
 msg "staging the local model"
 "${REPO_ROOT}/scripts/fetch-model.sh" "${PROFILE}/airootfs"
@@ -164,13 +256,16 @@ chmod 0755 "${PROFILE}/airootfs/usr/local/bin/"liteai-*
 llama_build="$(sed -n 's/^build=//p' "${PROFILE}/airootfs/usr/share/liteai/llama-version")"
 pi_version="$(sed -n 's/^version=//p' "${PROFILE}/airootfs/usr/share/liteai/pi-version")"
 model_file="$(sed -n 's/^MODEL=//p' "${PROFILE}/airootfs/etc/liteai/llama.conf")"
+os_name="LiteAI"
+[[ "${VARIANT}" == "cuda" ]] && os_name="LiteAI CUDA"
 install -Dm0644 /dev/stdin "${PROFILE}/airootfs/etc/os-release" <<EOF
-NAME="LiteAI"
-PRETTY_NAME="LiteAI ${BUILD_VERSION}"
+NAME="${os_name}"
+PRETTY_NAME="${os_name} ${BUILD_VERSION}"
 ID=liteai
 ID_LIKE=arch
 BUILD_ID=${BUILD_VERSION}
 VERSION_ID=${BUILD_VERSION}
+VARIANT_ID=${VARIANT}
 ANSI_COLOR="38;5;39"
 HOME_URL="https://github.com/danisss9/LiteAI"
 SUPPORT_URL="https://github.com/danisss9/LiteAI/issues"
@@ -178,6 +273,7 @@ BUG_REPORT_URL="https://github.com/danisss9/LiteAI/issues"
 EOF
 install -Dm0644 /dev/stdin "${PROFILE}/airootfs/usr/share/liteai/build-info" <<EOF
 build_version=${BUILD_VERSION}
+variant=${VARIANT}
 llama_build=${llama_build}
 pi_version=${pi_version}
 model=${model_file}
@@ -189,9 +285,21 @@ EOF
 # build
 # --------------------------------------------------------------------------
 
-msg "building ISO ${BUILD_VERSION} (llama.cpp ${llama_build}, pi ${pi_version})"
+msg "building ${VARIANT} ISO ${BUILD_VERSION} (llama.cpp ${llama_build}, pi ${pi_version})"
 export ISO_VERSION="${BUILD_VERSION}"
 mkarchiso -v -w "${WORK_DIR}/mkarchiso" -o "${OUT_DIR}" "${PROFILE}"
+
+# The staged tree could not be checked against the driver before pacstrap
+# ran (nvidia-utils only lands inside mkarchiso); verify the finished root
+# while it is still on disk.
+if [[ "${VARIANT}" == "cuda" ]]; then
+    image_root="$(find "${WORK_DIR}" -type d -path '*/airootfs/var/lib/pacman' -printf '%h\n' | head -1)"
+    if [[ -n "${image_root}" ]]; then
+        "${REPO_ROOT}/scripts/build-llamacpp-cuda.sh" --verify "${image_root}"
+    else
+        msg "warning: could not locate the built airootfs - skipping CUDA verification"
+    fi
+fi
 
 # --------------------------------------------------------------------------
 # publish artefacts
@@ -200,7 +308,10 @@ mkarchiso -v -w "${WORK_DIR}/mkarchiso" -o "${OUT_DIR}" "${PROFILE}"
 iso="$(find "${OUT_DIR}" -maxdepth 1 -name '*.iso' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
 [[ -n "${iso}" ]] || die "mkarchiso produced no ISO"
 
-target="${OUT_DIR}/LiteAI-${BUILD_VERSION}-x86_64.iso"
+iso_suffix=""
+[[ "${VARIANT}" == "cuda" ]] && iso_suffix="-cuda"
+
+target="${OUT_DIR}/LiteAI-${BUILD_VERSION}-x86_64${iso_suffix}.iso"
 if [[ "${iso}" != "${target}" ]]; then mv -- "${iso}" "${target}"; fi
 
 ( cd "${OUT_DIR}" && sha256sum "${target##*/}" > "${target##*/}.sha256" )
@@ -214,7 +325,7 @@ if [[ "${iso}" != "${target}" ]]; then mv -- "${iso}" "${target}"; fi
 # the one written here, in the 'name version' form `pacman -Q` prints. The ISO
 # already went out above, so a manifest that cannot be produced is a missing
 # nicety rather than a failed build: none of this is allowed to be fatal.
-manifest="${OUT_DIR}/LiteAI-${BUILD_VERSION}-x86_64.packages.txt"
+manifest="${OUT_DIR}/LiteAI-${BUILD_VERSION}-x86_64${iso_suffix}.packages.txt"
 rm -f "${manifest}"
 
 # The image's own package database is the authority on what it contains.

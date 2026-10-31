@@ -46,7 +46,9 @@ result.
   console system: no Xorg, no desktop, no fonts, no audio stack.
 - **llama.cpp** - a pinned, prebuilt upstream CPU binary in `/opt/llama.cpp`,
   run by `liteai-llama.service` on `127.0.0.1:8080` with the model's own chat
-  template (`--jinja`), which is what gives pi tool calling on Qwen.
+  template (`--jinja`), which is what gives pi tool calling on Qwen. The x86_64
+  CUDA ISO ships the same llama.cpp, compiled from the same pin with CUDA
+  enabled instead (see below).
 - **Qwen2.5-Coder-1.5B-Instruct, q4_k_m** (~1.1 GB) baked into the image at
   `/var/lib/liteai/models/`. Small enough to bake and to run in ~1.5 GB of
   RAM; the first thing pi can do for you is download a better one.
@@ -60,18 +62,44 @@ result.
 - Developer tools: git, nodejs/npm, base-devel, cmake, python, ripgrep, fd,
   htop, fastfetch, vim/nano. Go, Rust and the JDK are one `pacman -S` away.
 
-## The two images
+## The three images
 
 | Artifact | For | Boot |
 | --- | --- | --- |
 | `LiteAI-<version>-x86_64.iso` | PCs (UEFI x64/ia32, legacy BIOS) | live medium; `sudo liteai-install` puts the same system on a disk, offline |
+| `LiteAI-<version>-x86_64-cuda.iso` | PCs with an NVIDIA Turing (2016) or newer GPU | same live/install medium, plus the NVIDIA driver and a CUDA llama.cpp |
 | `LiteAI-<version>-aarch64-rpi.img.xz` | Raspberry Pi 5/4/400/CM4/3/Zero 2 W | the flashed card *is* the system; rootfs expands on first boot |
 
-Both bake the same model and ship the same AI stack. The ISO comes in just
-under GitHub's 2 GiB per-file release-asset limit - the firmware subpackage
-list is trimmed to make room for the model - and the compressed Pi image fits
-too, so both attach to the release directly. The Pi image unpacks to 8 GiB:
-use a 16 GB card or larger.
+All three bake the same model and ship the same AI stack. The standard ISO
+and the compressed Pi image come in just under GitHub's 2 GiB per-file
+release-asset limit - the firmware subpackage list is trimmed to make room
+for the model - so both attach to the release directly. The Pi image unpacks
+to 8 GiB: use a 16 GB card or larger.
+
+### The CUDA variant
+
+The CUDA ISO is the standard image plus `nvidia-open` (the open kernel
+modules built for the stock `linux` kernel), `nvidia-utils` and
+`linux-firmware-nvidia`, with llama.cpp compiled from the same pinned source
+with `-DGGML_CUDA=ON` for sm_75 through sm_120 (Turing GTX 16xx/RTX 20xx up
+through RTX 50xx) plus a compute_90 PTX image the driver JIT-compiles for
+newer hardware. `EXTRA_ARGS` in `/etc/liteai/llama.conf` defaults to
+`-ngl 99`, so the model runs on the GPU out of the box; on a machine without
+a supported NVIDIA GPU the same binary falls back to CPU and the flag is
+ignored.
+
+Three things to know:
+
+- It is large (~3 GiB) and therefore over GitHub's release-asset cap: it
+  ships as a workflow artifact - Actions -> Build images -> the build run ->
+  Artifacts - rather than as a release download.
+- The display-only part of `nvidia-utils` (GLX/EGL/Vulkan, NVENC/NVDEC, the
+  Xorg module, OptiX, the DLSS/Proton shims) is trimmed at build time; a
+  console-only image has no consumer for it. Everything the driver and CUDA
+  need - `libcuda`, NVML, the PTX JIT compiler, GSP firmware, `nvidia-smi` -
+  ships.
+- Secure Boot must be disabled (or the module enrolled): the NVIDIA kernel
+  module is not signed for your machine's keys.
 
 Default credentials: the PC live medium autologins as `liteai` with no
 password (root is likewise passwordless, like the official Arch medium) and
@@ -121,9 +149,9 @@ is itself one of the files pi can rewrite.
 
 ## Rebuilding llama.cpp with GPU support
 
-The shipped binary is the upstream CPU build. On a machine with a proper GPU,
-rebuild from source in the image - which is why `base-devel`, `cmake` and
-`python` are in the package set:
+The CPU and RPi images ship the upstream CPU build. On a machine with a
+proper GPU, rebuild from source in the image - which is why `base-devel`,
+`cmake` and `python` are in the package set:
 
 ```bash
 sudo pacman -S ninja opencl-clhpp clblast   # or the cuda/rocm equivalents
@@ -134,6 +162,9 @@ sudo cp /tmp/llama.cpp/build/bin/llama-* /opt/llama.cpp/bin/
 sudo systemctl restart liteai-llama
 ```
 
+(The x86_64 CUDA ISO already ships exactly this build, made at image-build
+time by `scripts/build-llamacpp-cuda.sh`.)
+
 ## Building the images
 
 The x86_64 ISO builds in an Arch container; the Pi image builds on an aarch64
@@ -143,27 +174,34 @@ host (or x86_64 with qemu binfmt). Locally:
 # x86_64 ISO (needs root, archiso, grub)
 sudo ./scripts/build-iso.sh -v 2026.10.31 -o out -w work
 
+# x86_64 CUDA ISO - same container plus the CUDA toolkit, which the build
+# script installs and removes itself (~1 h: seven CUDA architectures)
+sudo ./scripts/build-iso.sh --variant cuda -v 2026.10.31 -o out -w work
+
 # Raspberry Pi (needs root, aarch64 or binfmt)
 sudo ./rpi/build-image.sh -v 2026.10.31 -o out -w work-rpi
 ```
 
-CI does both on tags (`git tag v2026.10.31 && git push --tags`). The pieces
-each build stages: `fetch-llamacpp.sh` (pinned upstream llama.cpp build),
-`fetch-model.sh` (the baked GGUF, cacheable), `fetch-pi.sh` (pinned pi
-release) and `build-mcp.sh` (the MCP server, built and unit-tested once and
-shared by both targets).
+CI builds all three on tags (`git tag v2026.10.31 && git push --tags`). The
+pieces each build stages: `fetch-llamacpp.sh` (pinned upstream llama.cpp
+build; the CUDA variant runs `build-llamacpp-cuda.sh` instead, compiling the
+same pin from source), `fetch-model.sh` (the baked GGUF, cacheable),
+`fetch-pi.sh` (pinned pi release) and `build-mcp.sh` (the MCP server, built
+and unit-tested once and shared by all targets).
 
 ## Repository layout
 
 ```
 archiso/            x86_64 live/install medium (archiso profile)
+  packages-cuda.x86_64    extra packages for the CUDA variant
+  airootfs-cuda/    CUDA-variant overlay (module loading, loader path)
   airootfs/usr/local/bin/liteai-install   the offline installer
 rootfs-common/      everything both images share: AI stack plumbing,
                     systemd units, polkit rules, pkexec helpers, /etc/skel
 mcp/                the LiteAI MCP server (TypeScript, esbuild-bundled)
 rpi/                Raspberry Pi image builder, boot files, overlay
 scripts/            build + fetch scripts
-.github/workflows/  CI: mcp job, both image jobs, release
+.github/workflows/  CI: mcp job, three image jobs, release
 ```
 
 ## Details worth knowing if you are modifying it
@@ -188,6 +226,11 @@ scripts/            build + fetch scripts
   but llama.cpp (`LITEAI_LLAMACPP_BUILD`), pi (`LITEAI_PI_VERSION`) and the
   model (`LITEAI_MODEL_REPO`/`LITEAI_MODEL_FILE`) are pinned in their fetch
   scripts and recorded in `/usr/share/liteai/*-version` inside the image.
+- The CUDA ISO trims `nvidia-utils` with `NoExtract` lines injected into the
+  staged pacman.conf (a console box has no Xorg/Vulkan/NVENC consumer), and
+  `build-llamacpp-cuda.sh --verify` re-checks the finished rootfs after
+  mkarchiso: every `/opt/llama.cpp` dependency must resolve against the
+  image, and the driver files and GSP firmware must be present.
 - Recovery: GRUB keeps a recovery entry (PC), serial console is enabled on
   the Pi, and every non-tty1 login is a plain shell. `systemd.unit=
   multi-user.target` at the boot prompt boots without starting pi.

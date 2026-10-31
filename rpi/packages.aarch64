@@ -1,0 +1,63 @@
+# Packages installed on top of the Arch Linux ARM base for Raspberry Pi.
+#
+# Deliberately leaner than ever: an SD card is small, a Pi has little RAM, and
+# everything here either runs pi and llama.cpp or maintains the machine. The
+# AI stack itself is identical to the x86 image - see the comment in
+# archiso/packages.x86_64 for why llama.cpp is staged as a prebuilt binary
+# instead of packaged.
+
+# Kernel and Raspberry Pi firmware
+linux-rpi
+raspberrypi-bootloader
+firmware-raspberrypi
+# vcgencmd and friends; Arch Linux ARM renamed this from raspberrypi-firmware
+raspberrypi-utils
+linux-firmware-whence
+mkinitcpio
+
+# Base system
+sudo
+polkit
+dbus
+zram-generator
+pacman-contrib
+
+# Networking
+networkmanager
+wpa_supplicant
+wireless-regdb
+openssh
+wget
+curl
+ca-certificates
+
+# The local AI stack (nodejs/npm for pi and the MCP server; the rest is the
+# rebuild-it-yourself GPU upgrade path)
+nodejs
+npm
+cmake
+base-devel
+
+# Storage helpers the image itself needs
+dosfstools
+e2fsprogs
+parted
+rsync
+
+# Tools the AI (and the human) work with
+git
+python
+python-pip
+man-db
+less
+nano
+vim
+zip
+unzip
+tree
+htop
+ripgrep
+fd
+bash-completion
+openssl
+gnupg

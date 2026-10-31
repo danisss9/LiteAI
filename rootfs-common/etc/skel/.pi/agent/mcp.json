@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "liteai": {
+      "command": "node",
+      "args": ["/usr/share/liteai/mcp/server.cjs"],
+      "timeout": 1800,
+      "exposure": "direct",
+      "description": "Manage llama.cpp and its models, pi itself, and this machine (network, power, updates, logs)"
+    }
+  }
+}

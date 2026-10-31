@@ -1,0 +1,10 @@
+
+  LiteAI  -  Arch Linux ARM that boots straight into pi
+
+  Default login: liteai / liteai   (change it: passwd)
+
+  pi                          the AI session (starts automatically on tty1)
+  systemctl status liteai-llama   the local model server (Qwen on llama.cpp)
+  nmtui                       connect to Wi-Fi
+  sudo pacman -Syu            update the system
+

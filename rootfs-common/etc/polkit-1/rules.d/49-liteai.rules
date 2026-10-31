@@ -1,0 +1,61 @@
+/* LiteAI: let the pi session act on the machine without a password prompt.
+ *
+ * There is no polkit authentication agent in this session - the whole
+ * interface is a text-mode pi running on tty1, and there is nowhere for an
+ * agent to draw a dialog. Any action that resolves to auth_admin therefore
+ * does not prompt, it simply fails, silently, from the user's point of view.
+ * These grants cover exactly what the LiteAI MCP tools (and the human at the
+ * console) need and nothing more.
+ *
+ * systemd's own policy already answers `yes` to power-off/reboot/suspend for
+ * an active seat session, but only while no *other* session is logged in;
+ * logind.conf.d/liteai.conf keeps six gettys around, and a login on one of
+ * them would otherwise turn the power tool into a silent no-op.
+ *
+ * NetworkManager matters just as much on a headless box: upstream ships
+ * settings.modify.system as auth_admin_keep, so without this the AI could
+ * list Wi-Fi networks but never join one.
+ */
+
+polkit.addRule(function (action, subject) {
+    if (!subject.isInGroup("wheel") || !subject.local || !subject.active) {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    if (action.id.indexOf("org.freedesktop.login1.power-off") === 0
+        || action.id.indexOf("org.freedesktop.login1.reboot") === 0
+        || action.id.indexOf("org.freedesktop.login1.suspend") === 0
+        || action.id.indexOf("org.freedesktop.login1.hibernate") === 0) {
+        /* Deliberately not the *-ignore-inhibit variants: if something has taken
+           an inhibitor lock, the user should be told, not overridden. */
+        if (action.id.indexOf("ignore-inhibit") !== -1) {
+            return polkit.Result.NOT_HANDLED;
+        }
+        return polkit.Result.YES;
+    }
+
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
+        return polkit.Result.YES;
+    }
+
+    /* The LiteAI MCP tools run these four helpers through pkexec. Each one is
+       an exact program and not a directory or a prefix: this is a password-free
+       path to root, and it should reach exactly the scripts that are meant to
+       be reachable. Every one of them takes a fixed vocabulary of words and
+       validated values as its arguments and runs no user-supplied command line
+       (see the comments in each script for what keeps it that way).
+
+       sudo cannot do this job. liteai-install rewrites sudoers so wheel members
+       authenticate with their own password, and there is no polkit agent in
+       this session - so an auth_admin answer here would not ask, it would
+       silently fail. */
+    if (action.id === "org.freedesktop.policykit.exec"
+        && (action.lookup("program") === "/usr/local/bin/liteai-llama"
+            || action.lookup("program") === "/usr/local/bin/liteai-models"
+            || action.lookup("program") === "/usr/local/bin/liteai-pi"
+            || action.lookup("program") === "/usr/local/bin/liteai-update")) {
+        return polkit.Result.YES;
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});

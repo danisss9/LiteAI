@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# Manage the local model library from the pi session without a password.
+#
+# Runs through pkexec, which polkit answers without a prompt for exactly this
+# program (etc/polkit-1/rules.d/49-liteai.rules). Every argument is validated
+# against a pattern before anything happens; nothing here ever runs a command
+# line, only curl with a fixed URL shape and rm/mv on files whose names were
+# checked to be plain .gguf names with no path components.
+#
+# Usage: liteai-models list
+#        liteai-models download <owner>/<repo> <file.gguf>
+#        liteai-models remove <file.gguf>
+#        liteai-models default <file.gguf>
+#
+# `download` fetches from huggingface.co only, into a .part file it renames
+# into place afterwards, so an interrupted or repeated download never leaves a
+# half-written model looking like a real one. `default` points llama.conf at a
+# downloaded model and restarts llama-server; its output spells out the next
+# step, because pi's models.json has to learn the new alias too.
+
+set -Eeuo pipefail
+
+readonly MODELS_DIR="/var/lib/liteai/models"
+readonly CONF="/etc/liteai/llama.conf"
+readonly ACTION="${1:-}"
+
+msg() { printf '==> %s\n' "$*"; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+(( EUID == 0 )) || die "this must run as root (the LiteAI tools use pkexec)"
+
+# A file name, and nothing but a file name: no slashes, no dots-only tricks.
+check_model_name() {
+    local file="$1"
+    [[ "${file}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.gguf$ ]] ||
+        die "not a .gguf file name: ${file}"
+    [[ "${file}" != *..* ]] || die "not a .gguf file name: ${file}"
+}
+
+# The repository a model is downloaded from, in huggingface.co owner/repo form.
+check_repo() {
+    local repo="$1"
+    [[ "${repo}" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+        die "not an owner/repo pair: ${repo} (example: Qwen/Qwen2.5-Coder-7B-Instruct-GGUF)"
+}
+
+# The model /etc/liteai/llama.conf currently serves (empty when unset).
+current_model() {
+    sed -n 's/^MODEL=//p' "${CONF}" 2>/dev/null || true
+}
+
+# Rewrite MODEL (and ALIAS, derived from the file name) in the conf file.
+# Same awk as liteai-llama: whole-file rewrite through a temp file + rename.
+set_model() {
+    local file="$1" alias="${1%.gguf}" tmp
+    tmp="$(mktemp)"
+    awk -v m="${file}" -v a="${alias}" '
+        /^MODEL=/     { printf "MODEL=%s\n", m; next }
+        /^ALIAS=/     { printf "ALIAS=%s\n", a; next }
+        { print }
+    ' "${CONF}" > "${tmp}"
+    chown 0:0 "${tmp}"
+    chmod 0644 "${tmp}"
+    mv "${tmp}" "${CONF}"
+}
+
+case "${ACTION}" in
+    list)
+        printf 'served now:  '
+        local_model="$(current_model)"
+        if [[ -n "${local_model}" ]]; then
+            alias_now="$(sed -n 's/^ALIAS=//p' "${CONF}")"
+            printf '%s (alias: %s)\n' "${local_model}" "${alias_now:-?}"
+        else
+            printf 'nothing (llama.conf has no MODEL)\n'
+        fi
+        printf 'in %s:\n' "${MODELS_DIR}"
+        if compgen -G "${MODELS_DIR}/*.gguf" >/dev/null; then
+            for f in "${MODELS_DIR}"/*.gguf; do
+                mark=" "
+                [[ "$(basename "${f}")" == "${local_model}" ]] && mark="*"
+                printf ' %s %-60s %s\n' "${mark}" "$(basename "${f}")" \
+                    "$(du -h "${f}" | cut -f1)"
+            done
+        else
+            printf '   (empty)\n'
+        fi
+        ;;
+
+    download)
+        [[ -n "${3:-}" ]] || die "usage: liteai-models download <owner>/<repo> <file.gguf>"
+        repo="$2"; file="$3"
+        check_repo "${repo}"
+        check_model_name "${file}"
+
+        target="${MODELS_DIR}/${file}"
+        [[ -e "${target}" ]] && die "${file} already exists - remove it first (liteai-models remove ${file})"
+        mkdir -p "${MODELS_DIR}"
+
+        # One download at a time: mkdir is atomic, so the lock cannot be raced,
+        # and a lock left behind by a crash is cleaned up when its pid is gone.
+        lock="${MODELS_DIR}/.downloading"
+        log="${MODELS_DIR}/.download.log"
+        if [[ -d "${lock}" ]]; then
+            lockpid="$(cat "${lock}/pid" 2>/dev/null || true)"
+            if [[ -n "${lockpid}" ]] && kill -0 "${lockpid}" 2>/dev/null; then
+                die "a download is already running (pid ${lockpid}) - see ${log}"
+            fi
+            rm -rf "${lock}"
+        fi
+        mkdir "${lock}"
+        echo $$ > "${lock}/pid"
+
+        # -C - resumes a previous attempt; -sL keeps the output readable.
+        # curl's chatter goes to a log beside the models, not inside the lock
+        # directory - the lock's EXIT trap removes that directory, including
+        # on failure, and the log has to survive it.
+        url="https://huggingface.co/${repo}/resolve/main/${file}"
+        if ! (
+            set -Eeuo pipefail
+            trap 'rm -rf "${lock}"' EXIT
+            msg "downloading ${url}"
+            curl --fail --location --retry 5 --retry-delay 3 --retry-connrefused \
+                --continue-at - --silent --show-error \
+                -o "${target}.part" "${url}" 2> "${log}"
+            bytes="$(stat -c %s "${target}.part")"
+            sha256sum "${target}.part" > "${target}.part.sha256"
+            mv "${target}.part" "${target}"
+            mv "${target}.part.sha256" "${target}.sha256"
+            printf 'url=%s\nfetched=%s\nbytes=%s\nsha256=%s\n' \
+                "${url}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${bytes}" \
+                "$(cut -d' ' -f1 < "${target}.sha256")" > "${target}.meta"
+            msg "done: ${file} ($(numfmt --to=iec --suffix=B "${bytes}" 2>/dev/null || echo "${bytes} bytes"))"
+        ); then
+            msg "download failed - curl log:"
+            sed 's/^/    /' "${log}" 2>/dev/null || true
+            die "${file} was not downloaded"
+        fi
+        ;;
+
+    remove)
+        [[ -n "${2:-}" ]] || die "usage: liteai-models remove <file.gguf>"
+        file="$2"
+        check_model_name "${file}"
+        served="$(current_model)"
+        [[ "${file}" != "${served}" ]] ||
+            die "${file} is the model llama-server is serving right now - switch first (liteai-models default <other>)"
+        [[ -f "${MODELS_DIR}/${file}" ]] || die "${file} is not in ${MODELS_DIR}"
+        rm -f "${MODELS_DIR}/${file}" "${MODELS_DIR}/${file}.sha256" "${MODELS_DIR}/${file}.meta"
+        msg "removed ${file}"
+        ;;
+
+    default)
+        [[ -n "${2:-}" ]] || die "usage: liteai-models default <file.gguf>"
+        file="$2"
+        check_model_name "${file}"
+        [[ -f "${MODELS_DIR}/${file}" ]] || die "${file} is not in ${MODELS_DIR} - download it first"
+        set_model "${file}"
+        new_alias="${file%.gguf}"
+        msg "llama.conf now serves ${file} as alias '${new_alias}'"
+        systemctl daemon-reload
+        systemctl restart liteai-llama
+        msg "liteai-llama restarted"
+        printf 'next step: update ~/.pi/agent/models.json so the llamacpp provider\n'
+        printf 'lists model id "%s", then /model in pi (mcp__liteai__pi_config does it).\n' "${new_alias}"
+        ;;
+
+    *)
+        die "usage: liteai-models list|download <owner>/<repo> <file.gguf>|remove <file.gguf>|default <file.gguf>"
+        ;;
+esac

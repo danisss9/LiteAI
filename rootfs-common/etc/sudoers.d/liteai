@@ -1,0 +1,6 @@
+# LiteAI: members of wheel may use sudo.
+# On the live medium this is passwordless so the installer (and the pkexec
+# helpers) work from the pi console; `liteai-install` tightens this on the
+# installed system.
+%wheel ALL=(ALL:ALL) ALL
+liteai ALL=(ALL:ALL) NOPASSWD: ALL

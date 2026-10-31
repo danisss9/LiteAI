@@ -1,0 +1,13 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "llamacpp": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "liteai",
+      "models": [
+        { "id": "qwen2.5-coder-1.5b" }
+      ]
+    }
+  }
+}

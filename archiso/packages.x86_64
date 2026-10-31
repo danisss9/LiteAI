@@ -1,0 +1,88 @@
+# Base system
+base
+linux
+# The linux-firmware metapackage pulls ~773 MB of blobs, and firmware is already
+# compressed, so squashfs cannot claw any of it back - it lands on the ISO
+# roughly 1:1. Only the subpackages an x86 machine can actually use are listed.
+# Dropped: qcom (Snapdragon SoC - phones/ARM laptops), mellanox, qlogic, nfp and
+# liquidio (datacenter NICs and Fibre Channel HBAs).
+linux-firmware-intel
+linux-firmware-atheros
+linux-firmware-realtek
+linux-firmware-mediatek
+linux-firmware-broadcom
+linux-firmware-marvell
+linux-firmware-amdgpu
+linux-firmware-radeon
+linux-firmware-nvidia
+linux-firmware-cirrus
+linux-firmware-other
+intel-ucode
+amd-ucode
+mkinitcpio
+mkinitcpio-archiso
+mkinitcpio-nfs-utils
+sudo
+polkit
+dbus
+# checkupdates, for the LiteAI tools: package_query lists pending updates
+# against a copy of the sync database, so the AI never has to run `pacman -Sy`
+# - which would leave the real database half-synced and the machine one command
+# away from a partial upgrade.
+pacman-contrib
+
+# Live medium / installer tooling
+arch-install-scripts
+dosfstools
+e2fsprogs
+gptfdisk
+parted
+rsync
+efibootmgr
+grub
+syslinux
+memtest86+
+memtest86+-efi
+util-linux
+
+# Networking
+networkmanager
+wpa_supplicant
+wireless-regdb
+openssh
+wget
+curl
+ca-certificates
+
+# The local AI stack.
+#
+# nodejs and npm run pi (the coding agent the machine boots into) and the
+# LiteAI MCP server. llama.cpp itself is NOT a package: scripts/fetch-llamacpp.sh
+# stages a prebuilt upstream binary into /opt/llama.cpp, which keeps builds
+# reproducible and free of AUR dependencies. base-devel, cmake and python exist
+# so the machine can rebuild llama.cpp with GPU support later - the documented
+# upgrade path for anyone whose hardware deserves better than the CPU build.
+nodejs
+npm
+cmake
+base-devel
+
+# Tools the AI (and the human) work with
+git
+python
+python-pip
+man-db
+man-pages
+less
+nano
+vim
+zip
+unzip
+tree
+htop
+fastfetch
+ripgrep
+fd
+bash-completion
+openssl
+gnupg

@@ -1,0 +1,23 @@
+{
+  "name": "liteai-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LiteAI MCP server: lets pi manage llama.cpp, its models, pi itself and this machine",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node esbuild.mjs test && node --test out/test.cjs",
+    "build": "node esbuild.mjs server",
+    "smoke": "node esbuild.mjs server && node smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}

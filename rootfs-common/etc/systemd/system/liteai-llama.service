@@ -1,0 +1,32 @@
+# LiteAI: the local model server.
+#
+# llama-server serves the baked model on 127.0.0.1:8080 with an
+# OpenAI-compatible API; pi talks to it through ~/.pi/agent/models.json. The
+# knobs live in /etc/liteai/llama.conf, edited through the liteai-llama helper
+# (which the polkit policy grants to the pi session without a prompt) so that
+# the service is restarted after every change.
+#
+# --jinja makes llama.cpp use the model's own chat template, which is what
+# gives Qwen's template its tool-call support; pi's function calling relies
+# on it.
+#
+# --host/--port are repeated AFTER ${EXTRA_ARGS} on purpose: llama.cpp keeps
+# the last occurrence of an option, so this pins the server to loopback no
+# matter what EXTRA_ARGS contains. systemd expands EnvironmentFile values as
+# plain words - there is no shell here to interpret anything.
+#
+# The model file is root-owned and only ever read, so the service needs no
+# special privileges.
+
+[Unit]
+Description=LiteAI local model server (llama.cpp)
+After=network.target
+
+[Service]
+EnvironmentFile=/etc/liteai/llama.conf
+ExecStart=/opt/llama.cpp/bin/llama-server --host 127.0.0.1 --port 8080 -m /var/lib/liteai/models/${MODEL} --alias ${ALIAS} --jinja -c ${CTX} -t ${THREADS} ${EXTRA_ARGS} --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

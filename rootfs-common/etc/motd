@@ -1,0 +1,9 @@
+
+  LiteAI  -  minimal Arch Linux that boots straight into pi
+
+  pi                          the AI session (starts automatically on tty1)
+  systemctl status liteai-llama   the local model server (Qwen on llama.cpp)
+  nmtui                       connect to Wi-Fi
+  sudo liteai-install         install this system onto a disk
+  sudo pacman -Syu            update the system
+

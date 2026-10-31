@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Control the LiteAI model server from the pi session without a password.
+#
+# This runs through pkexec, which polkit answers without a prompt for exactly
+# this program (etc/polkit-1/rules.d/49-liteai.rules). sudo is not an option:
+# liteai-install tightens sudoers to ask for a password, and there is no polkit
+# authentication agent in a session whose entire interface is a text console,
+# so a password prompt has nowhere to appear and would simply hang.
+#
+# Usage: liteai-llama status|start|stop|restart
+#        liteai-llama set MODEL|ALIAS|CTX|THREADS|EXTRA_ARGS <value>
+#
+# `set` edits /etc/liteai/llama.conf and restarts the service. Every key is
+# from a fixed whitelist and every value is checked against a pattern before
+# anything is written - in particular MODEL must be an existing file in
+# /var/lib/liteai/models and EXTRA_ARGS is limited to characters that can only
+# form llama-server flags (systemd expands the value as plain words, so no
+# shell could be involved even in principle, and the unit pins --host/--port
+# after it so loopback cannot be given up).
+
+set -Eeuo pipefail
+
+readonly CONF="/etc/liteai/llama.conf"
+readonly MODELS_DIR="/var/lib/liteai/models"
+readonly ACTION="${1:-}"
+
+msg() { printf '==> %s\n' "$*"; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+(( EUID == 0 )) || die "this must run as root (the LiteAI tools use pkexec)"
+
+# Rewrite one KEY=VALUE line in the conf file, preserving everything else and
+# appending the key if it was somehow missing. Atomic: write a temp file and
+# rename, so a crash mid-write can never leave a half file behind for the
+# service to choke on.
+set_conf() {
+    local key="$1" value="$2" tmp
+    tmp="$(mktemp)"
+    awk -v k="${key}" -v v="${value}" '
+        BEGIN { done = 0 }
+        /^[A-Za-z_]+=/ {
+            split($0, kv, "=")
+            if (kv[1] == k) { printf "%s=%s\n", k, v; done = 1; next }
+        }
+        { print }
+        END { if (!done) printf "%s=%s\n", k, v }
+    ' "${CONF}" > "${tmp}"
+    chown 0:0 "${tmp}"
+    chmod 0644 "${tmp}"
+    mv "${tmp}" "${CONF}"
+}
+
+validate_kv() {
+    local key="$1" value="$2"
+
+    case "${key}" in
+        MODEL)
+            [[ "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.gguf$ ]] ||
+                die "MODEL must be a .gguf file name (got: ${value})"
+            [[ -f "${MODELS_DIR}/${value}" ]] ||
+                die "${value} is not in ${MODELS_DIR} - download it first (liteai-models download)"
+            ;;
+        ALIAS)
+            [[ "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+                die "ALIAS may only contain letters, digits, '.', '_' and '-' (got: ${value})"
+            ;;
+        CTX)
+            [[ "${value}" =~ ^[0-9]+$ ]] || die "CTX must be a number (got: ${value})"
+            (( value >= 256 && value <= 131072 )) ||
+                die "CTX must be between 256 and 131072 tokens (got: ${value})"
+            ;;
+        THREADS)
+            [[ "${value}" =~ ^[0-9]+$ ]] || die "THREADS must be a number, 0 = automatic (got: ${value})"
+            ;;
+        EXTRA_ARGS)
+            # One line, flag-shaped characters only. No quotes, no dollar
+            # signs, no semicolons - not that systemd would run them, but
+            # there is no reason to make the conf file look like a place to
+            # try.
+            [[ "${value}" =~ ^[A-Za-z0-9\ =:._/+-]*$ ]] ||
+                die "EXTRA_ARGS may only contain letters, digits, spaces and = : . _ / + -"
+            [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] ||
+                die "EXTRA_ARGS must be a single line"
+            ;;
+        *)
+            die "unknown key: ${key} (MODEL, ALIAS, CTX, THREADS, EXTRA_ARGS)"
+            ;;
+    esac
+}
+
+case "${ACTION}" in
+    status)
+        # systemctl status exits non-zero when the unit is not running; that
+        # is a valid answer, not a failure of this script.
+        systemctl status liteai-llama --no-pager || true
+        ;;
+    start|stop|restart)
+        systemctl "${ACTION}" liteai-llama
+        msg "liteai-llama ${ACTION}ed"
+        ;;
+    set)
+        [[ -n "${3:-}" ]] || die "usage: liteai-llama set KEY VALUE"
+        validate_kv "$2" "$3"
+        set_conf "$2" "$3"
+        msg "llama.conf: $2=$3"
+        systemctl daemon-reload
+        systemctl restart liteai-llama
+        msg "liteai-llama restarted with the new configuration"
+        ;;
+    *)
+        die "usage: liteai-llama status|start|stop|restart|set KEY VALUE"
+        ;;
+esac

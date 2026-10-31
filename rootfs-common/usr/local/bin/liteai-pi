@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Update pi, the coding agent this machine boots into, without a password.
+#
+# Runs through pkexec, which polkit answers without a prompt for exactly this
+# program (etc/polkit-1/rules.d/49-liteai.rules). The only arguments are the
+# fixed words below plus, for `update`, one optional version string that is
+# checked against the characters npm semver ranges use.
+#
+# Usage: liteai-pi version
+#        liteai-pi update [version]
+
+set -Eeuo pipefail
+
+readonly PACKAGE="@earendil-works/pi-coding-agent"
+readonly VERSION_FILE="/usr/share/liteai/pi-version"
+readonly ACTION="${1:-}"
+
+msg() { printf '==> %s\n' "$*"; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+(( EUID == 0 )) || die "this must run as root (the LiteAI tools use pkexec)"
+
+case "${ACTION}" in
+    version)
+        if [[ -r "${VERSION_FILE}" ]]; then cat "${VERSION_FILE}"; else echo "unknown"; fi
+        command -v pi >/dev/null 2>&1 && pi --version 2>/dev/null || true
+        ;;
+
+    update)
+        target="${2:-latest}"
+        # A version is a semver string or a dist-tag - letters, digits and the
+        # punctuation npm uses. Anything else is refused before npm sees it.
+        [[ "${target}" =~ ^[A-Za-z0-9][A-Za-z0-9.+_-]*$ ]] ||
+            die "not a version or dist-tag: ${target}"
+        command -v npm >/dev/null || die "npm is not installed"
+        msg "updating ${PACKAGE} to ${target}"
+        # --ignore-scripts is what the image build uses too: the package is
+        # JavaScript and needs no postinstall to work, and skipped scripts are
+        # one less supply-chain surface on a machine that downloads it itself.
+        npm install --global --ignore-scripts "${PACKAGE}@${target}"
+        version="$(npm view "${PACKAGE}@${target}" version 2>/dev/null || echo unknown)"
+        install -Dm0644 /dev/stdin "${VERSION_FILE}" <<EOF
+version=${version}
+package=${PACKAGE}
+updated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+        msg "pi updated to ${version}"
+        printf 'restart any running pi session to pick it up.\n'
+        ;;
+
+    *)
+        die "usage: liteai-pi version|update [version]"
+        ;;
+esac

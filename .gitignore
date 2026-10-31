@@ -1,0 +1,23 @@
+# Build output
+/out/
+/work/
+/work-rpi/
+*.iso
+*.img
+*.img.xz
+*.sha256
+*.packages.txt
+
+# pacman sync databases, dropped in the working tree by a build run from here
+*.db
+
+# MCP server build output. The sources are committed; the bundles are not.
+/mcp/node_modules/
+/mcp/out/
+
+# Model downloads cached for local builds
+/model-cache/
+
+# Editor / OS noise
+.DS_Store
+*.swp

@@ -10,8 +10,9 @@
 # build starts). It installs the CUDA toolkit into the container with pacman
 # - build-time only: the toolkit itself never enters the image. The staged
 # tree keeps the /opt/llama.cpp/bin layout liteai-llama.service hardcodes,
-# and the CUDA runtime libraries cudart does not statically link (cuBLAS,
-# cuBLASLt, nvJitLink) are copied out of the toolkit into /opt/llama.cpp/lib.
+# and the CUDA runtime libraries the build links dynamically (the CUDA
+# runtime itself, cuBLAS, cuBLASLt, nvJitLink) are copied out of the toolkit
+# into /opt/llama.cpp/lib.
 # libcuda.so.1 comes from the image's nvidia-utils package, which only lands
 # during mkarchiso - hence --verify mode, called by build-iso.sh against the
 # finished rootfs, where every dependency must resolve and the driver files
@@ -183,9 +184,12 @@ cmake --install "${tmp}/build" --prefix "${PREFIX}" --strip
 # plus libraries.
 rm -rf -- "${PREFIX}/include" "${PREFIX}/share" "${PREFIX}/lib/cmake" "${PREFIX}/lib/pkgconfig"
 
-msg "bundling the CUDA runtime libraries (cudart is statically linked)"
+msg "bundling the CUDA runtime libraries"
+# ggml links the shared CUDA runtime directly (CUDA::cudart), regardless of
+# CMAKE_CUDA_RUNTIME_LIBRARY, so the toolkit's shared libraries have to
+# travel: cudart itself, cuBLAS and cuBLASLt with their nvJitLink dependency.
 # Toolkit copies first: those are the ones this build ran against.
-for name in libcublas.so.13 libcublasLt.so.13 libnvJitLink.so.13; do
+for name in libcudart.so.13 libcublas.so.13 libcublasLt.so.13 libnvJitLink.so.13; do
     src=""
     for dir in /opt/cuda/lib64 /usr/lib; do
         if compgen -G "${dir}/${name}*" >/dev/null; then src="${dir}"; break; fi

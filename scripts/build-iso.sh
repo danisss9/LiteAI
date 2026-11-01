@@ -88,6 +88,14 @@ cp -a "${PROFILE_SRC}/." "${PROFILE}/"
 install -d -m 0755 "${PROFILE}/airootfs"
 cp -a "${ROOTFS_COMMON}/." "${PROFILE}/airootfs/"
 
+# Both PC variants ship a GPU-capable llama.cpp - upstream's Vulkan build in
+# the standard image, the CUDA build in the cuda variant - so offload every
+# layer by default. Where no usable GPU is present the backend finds no
+# device, llama.cpp falls back to CPU, and the flag is ignored. (The
+# Raspberry Pi image has its own build script and leaves EXTRA_ARGS empty
+# for its CPU-only llama.cpp.)
+sed -i 's/^EXTRA_ARGS=$/EXTRA_ARGS=-ngl 99/' "${PROFILE}/airootfs/etc/liteai/llama.conf"
+
 # The CUDA variant layers the NVIDIA stack onto the standard one: extra
 # packages, a small overlay (module loading, the loader path for the bundled
 # CUDA runtime) and the NoExtract trims below - all applied to the staged
@@ -142,6 +150,14 @@ if [[ "${VARIANT}" == "cuda" ]]; then
     cp -a "${REPO_ROOT}/archiso/airootfs-cuda/." "${PROFILE}/airootfs/"
     cat "${REPO_ROOT}/archiso/packages-cuda.x86_64" >> "${PROFILE}/packages.x86_64"
 
+    # The shared package list also carries the standard image's AMD/Intel
+    # Vulkan stack (vulkan-icd-loader, vulkan-radeon, vulkan-intel) and the
+    # amdgpu firmware that goes with it. The CUDA variant has no use for
+    # either - its llama.cpp is a CUDA build, not a Vulkan one - and the
+    # usr/share/vulkan NoExtract trim below would strip the Mesa ICD
+    # manifests out of them anyway. Drop them instead of shipping them dead.
+    sed -i -e '/^vulkan-/d' -e '/^linux-firmware-amdgpu$/d' "${PROFILE}/packages.x86_64"
+
     # nvidia-utils is ~950 MB and mostly display stack this image cannot
     # use; NoExtract makes pacstrap skip those files outright. Everything on
     # the CUDA/driver path (libcuda, NVML, the PTX JIT compiler, GSP
@@ -152,11 +168,6 @@ if [[ "${VARIANT}" == "cuda" ]]; then
     done
     grep -q '^NoExtract' "${PROFILE}/pacman.conf" ||
         die "NoExtract trims were not applied to the staged pacman.conf"
-
-    # Same llama.cpp pin, built for CUDA; GPU offload on by default. On a
-    # machine without a supported NVIDIA GPU the CUDA backend finds no
-    # device, llama.cpp falls back to CPU, and the flag is ignored.
-    sed -i 's/^EXTRA_ARGS=$/EXTRA_ARGS=-ngl 99/' "${PROFILE}/airootfs/etc/liteai/llama.conf"
 
     sed -i \
         -e 's/^iso_name="liteai"$/iso_name="liteai-cuda"/' \

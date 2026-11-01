@@ -3,20 +3,22 @@ base
 linux
 # The linux-firmware metapackage pulls ~773 MB of blobs, and firmware is already
 # compressed, so squashfs cannot claw any of it back - it lands on the ISO
-# roughly 1:1. Only the subpackages an x86 machine can actually use are listed,
-# and the list is also what keeps the ISO under GitHub's 2 GiB per-file
-# release-asset limit: the baked model eats about a gigabyte of that budget.
-# Dropped: qcom (Snapdragon SoC - phones/ARM laptops), mellanox, qlogic, nfp and
-# liquidio (datacenter NICs and Fibre Channel HBAs), other (the long tail of
-# obscure devices; the common Wi-Fi families below are kept), marvell (legacy
-# laptop Wi-Fi), cirrus (laptop smart-amp DSP - a headless box has no speakers),
-# broadcom (mostly pre-2015 laptop Wi-Fi), and the GPU families entirely:
-# amdgpu, radeon and nvidia. There is no Xorg here to accelerate - without
-# their firmware the GPU drivers fail to load and the kernel falls back to
-# simpledrm/efifb, which drives the text console fine. Anyone attaching a
-# display or building GPU llama.cpp installs the matching subpackage first:
-#     sudo pacman -S linux-firmware-amdgpu   # (or -nvidia / -radeon)
+# roughly 1:1. Only the subpackages an x86 machine can actually use are listed;
+# the baked model eats about a gigabyte of the release budget, so everything
+# without a consumer in this image is dropped: qcom (Snapdragon SoC - phones/ARM
+# laptops), mellanox, qlogic, nfp and liquidio (datacenter NICs and Fibre
+# Channel HBAs), other (the long tail of obscure devices; the common Wi-Fi
+# families below are kept), marvell (legacy laptop Wi-Fi), cirrus (laptop
+# smart-amp DSP - a headless box has no speakers), broadcom (mostly pre-2015
+# laptop Wi-Fi), and the radeon and nvidia GPU families. radeon is pre-GCN3
+# silicon, older than RADV supports; nvidia firmware only pays off with the
+# NVIDIA driver stack, which is the CUDA ISO variant (packages-cuda.x86_64).
+# linux-firmware-amdgpu stays despite being the largest single item: the
+# Vulkan llama.cpp in this image offloads to AMD GPUs, and the amdgpu kernel
+# driver cannot bind the hardware without its firmware. Intel iGPU firmware
+# rides along in linux-firmware-intel.
 linux-firmware-intel
+linux-firmware-amdgpu
 linux-firmware-atheros
 linux-firmware-realtek
 linux-firmware-mediatek
@@ -63,12 +65,24 @@ ca-certificates
 # LiteAI MCP server. llama.cpp itself is NOT a package: scripts/fetch-llamacpp.sh
 # stages a prebuilt upstream binary into /opt/llama.cpp, which keeps builds
 # reproducible and free of AUR dependencies. base-devel, cmake and python exist
-# so the machine can rebuild llama.cpp with GPU support later - the documented
-# upgrade path for anyone whose hardware deserves better than the CPU build.
+# so the machine can rebuild llama.cpp with a different backend (ROCm, SYCL)
+# later - the documented upgrade path for anyone whose hardware deserves
+# something the shipped binary does not offer.
 nodejs
 npm
 cmake
 base-devel
+
+# The Vulkan runtime the staged llama.cpp needs: upstream's x64 build is
+# compiled with GGML_VULKAN and links against the loader, whose ICD manifests
+# point it at Mesa's RADV (AMD) and ANV (Intel) drivers. With no Vulkan device
+# present the binary simply infers on the CPU, so a machine without a usable
+# GPU pays nothing but disk. NVIDIA's ICD ships in nvidia-utils, whose display
+# stack and kernel module have no business in the standard image - NVIDIA
+# cards are what the CUDA ISO variant is for.
+vulkan-icd-loader
+vulkan-radeon
+vulkan-intel
 
 # Tools the AI (and the human) work with
 git

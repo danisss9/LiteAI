@@ -44,11 +44,13 @@ result.
 
 - **Arch Linux** (x86_64) or **Arch Linux ARM** (Raspberry Pi), trimmed to a
   console system: no Xorg, no desktop, no fonts, no audio stack.
-- **llama.cpp** - a pinned, prebuilt upstream CPU binary in `/opt/llama.cpp`,
+- **llama.cpp** - a pinned, prebuilt upstream binary in `/opt/llama.cpp`,
   run by `liteai-llama.service` on `127.0.0.1:8080` with the model's own chat
-  template (`--jinja`), which is what gives pi tool calling on Qwen. The x86_64
-  CUDA ISO ships the same llama.cpp, compiled from the same pin with CUDA
-  enabled instead (see below).
+  template (`--jinja`), which is what gives pi tool calling on Qwen. The
+  x86_64 ISO ships the Vulkan build: AMD and Intel GPUs offload through the
+  Mesa drivers, machines with no Vulkan device infer on the CPU (see below).
+  The x86_64 CUDA ISO compiles the same pin from source with CUDA enabled
+  instead, and the Raspberry Pi keeps the plain CPU build.
 - **Qwen2.5-Coder-1.5B-Instruct, q4_k_m** (~1.1 GB) baked into the image at
   `/var/lib/liteai/models/`. Small enough to bake and to run in ~1.5 GB of
   RAM; the first thing pi can do for you is download a better one.
@@ -66,15 +68,18 @@ result.
 
 | Artifact | For | Boot |
 | --- | --- | --- |
-| `LiteAI-<version>-x86_64.iso` | PCs (UEFI x64/ia32, legacy BIOS) | live medium; `sudo liteai-install` puts the same system on a disk, offline |
+| `LiteAI-<version>-x86_64.iso` | PCs (UEFI x64/ia32, legacy BIOS) - AMD/Intel GPU offload via Vulkan, CPU otherwise | live medium; `sudo liteai-install` puts the same system on a disk, offline |
 | `LiteAI-<version>-x86_64-cuda.iso` | PCs with an NVIDIA Turing (2016) or newer GPU | same live/install medium, plus the NVIDIA driver and a CUDA llama.cpp |
 | `LiteAI-<version>-aarch64-rpi.img.xz` | Raspberry Pi 5/4/400/CM4/3/Zero 2 W | the flashed card *is* the system; rootfs expands on first boot |
 
-All three bake the same model and ship the same AI stack. The standard ISO
-and the compressed Pi image come in just under GitHub's 2 GiB per-file
-release-asset limit - the firmware subpackage list is trimmed to make room
-for the model - so both attach to the release directly. The Pi image unpacks
-to 8 GiB: use a 16 GB card or larger.
+All three bake the same model and ship the same AI stack, and all three
+attach to the GitHub release. GitHub caps a single release file at 2 GiB,
+and images that cross it - the CUDA ISO always, the standard ISO since it
+began carrying the amdgpu firmware its Vulkan support needs - ship as a
+multi-part zip archive split into ~1.9 GiB parts: download every part into
+one folder and extract the `.zip` one (7-Zip/WinRAR on Windows, `7z` or
+Info-ZIP on Linux/macOS); the release notes walk through it. The Pi image
+unpacks to 8 GiB: use a 16 GB card or larger.
 
 ### The CUDA variant
 
@@ -90,9 +95,10 @@ ignored.
 
 Three things to know:
 
-- It is large (~3 GiB) and therefore over GitHub's release-asset cap: it
-  ships as a workflow artifact - Actions -> Build images -> the build run ->
-  Artifacts - rather than as a release download.
+- It is large (~3 GiB), which is past GitHub's 2 GiB per-file release-asset
+  cap, so it attaches to the release as a multi-part zip archive: download
+  every part into one folder and extract the `.zip` one - the release notes
+  spell out the exact commands per platform.
 - The display-only part of `nvidia-utils` (GLX/EGL/Vulkan, NVENC/NVDEC, the
   Xorg module, OptiX, the DLSS/Proton shims) is trimmed at build time; a
   console-only image has no consumer for it. Everything the driver and CUDA
@@ -105,6 +111,22 @@ Default credentials: the PC live medium autologins as `liteai` with no
 password (root is likewise passwordless, like the official Arch medium) and
 the installer tightens sudo on the installed system. The Pi image logs in as
 `liteai` / `liteai` - change it with `passwd`.
+
+### The Vulkan support in the standard ISO
+
+The standard ISO's llama.cpp is upstream's Vulkan build. On a PC with an AMD
+GPU (GCN3-era silicon and newer, roughly R9 285/RX 400 through RDNA 3) or an
+Intel GPU (Broadwell-era iGPUs and newer, Arc included), llama-server
+offloads to it through Mesa's RADV/ANV drivers, which the image ships;
+`EXTRA_ARGS` in `/etc/liteai/llama.conf` defaults to `-ngl 99`, so the model
+runs on the GPU out of the box. Machines with no Vulkan device - or an
+NVIDIA card, whose Vulkan driver ships in `nvidia-utils` and is deliberately
+not part of this image - find no device, fall back to CPU inference, and the
+flag is ignored: one binary covers every x86_64 machine. Secure Boot needs
+no attention either: everything comes from the Arch repositories, and no
+out-of-tree kernel module is built or loaded. The price of the AMD coverage
+is `linux-firmware-amdgpu`, the largest firmware family - which is why the
+standard ISO can now cross GitHub's 2 GiB asset cap and ship split.
 
 ## Using the machine
 
@@ -149,9 +171,11 @@ is itself one of the files pi can rewrite.
 
 ## Rebuilding llama.cpp with GPU support
 
-The CPU and RPi images ship the upstream CPU build. On a machine with a
-proper GPU, rebuild from source in the image - which is why `base-devel`,
-`cmake` and `python` are in the package set:
+The Raspberry Pi image ships the upstream CPU build, the PC ISOs their
+respective GPU builds (Vulkan, CUDA). For anything else - ROCm for AMD,
+SYCL for Intel, a newer llama.cpp than the pin - rebuild from source in the
+image, which is why `base-devel`, `cmake` and `python` are in the package
+set:
 
 ```bash
 sudo pacman -S ninja opencl-clhpp clblast   # or the cuda/rocm equivalents

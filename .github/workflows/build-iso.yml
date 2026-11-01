@@ -1,7 +1,7 @@
 name: Build images
 
-# Tagging the repository builds both images and publishes them as one GitHub
-# release:
+# Tagging the repository builds all three images and publishes them as one
+# GitHub release:
 #
 #     git tag v1.0.0 && git push origin v1.0.0
 #
@@ -12,12 +12,14 @@ name: Build images
 # The workflow can also be run by hand from the Actions tab, which uploads the
 # images as build artifacts without touching releases.
 #
-# The baked model puts the images at GitHub's 2 GiB release-asset limit: the
-# standard x86_64 and RPi images are trimmed to just under it, but the CUDA
-# ISO (NVIDIA driver + CUDA llama.cpp on top) is not. It always travels as a
-# workflow artifact (downloadable from the run page for 14 days; raise
-# retention or mirror them externally as needed), and the release job links
-# to it instead of attaching it.
+# GitHub caps a single release asset at 2 GiB. The baked model puts every
+# image near that line, the CUDA ISO (NVIDIA driver + CUDA llama.cpp on top)
+# is expected to cross it, and the standard x86_64 ISO does too since it began
+# carrying the amdgpu firmware its Vulkan build needs. The release job
+# therefore splits any image of 2 GiB or more into multi-part zip volumes
+# (about 1.9 GiB per part) and attaches those to the release with everything
+# else; the release notes explain how to reassemble the image. All three
+# images ship through the release one way or another.
 #
 # Pull requests run the `mcp` job and nothing else. It takes a couple of
 # minutes and is the only part of a build that can fail on a code mistake
@@ -233,12 +235,9 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # The baked model puts the ISO past GitHub's 2 GiB release-asset limit on
-      # purpose. Nothing fails: the image travels as a workflow artifact and the
-      # release notes point at it (see the release job).
-      # The image travels as a workflow artifact too (handy without signing in
-      # to a release), but the release job attaches it to the release itself -
-      # the size guard below keeps it under GitHub's 2 GiB per-file limit.
+      # The release job attaches everything this job uploads to the release
+      # itself; images at or past GitHub's 2 GiB per-file asset limit are
+      # split into multi-part zip archives there (see the release job).
       - name: Upload image
         uses: actions/upload-artifact@v7
         with:
@@ -256,17 +255,20 @@ jobs:
             out/*.packages.txt
           retention-days: 14
 
-      # A release asset over 2 GiB is rejected by the uploads API with an HTTP
-      # 422 - which used to surface in the release job after both images had
-      # built. Failing here instead costs minutes and names the knob.
-      - name: Check the ISO fits a release asset
+      # The release job splits anything at or past GitHub's 2 GiB per-file
+      # asset limit into multi-part zips, so oversize is no longer a build
+      # failure - but a runaway image still deserves a stop. 3 GiB is a
+      # sanity cap, not a product requirement: growing past it means
+      # something stopped being trimmed (the amdgpu firmware the Vulkan
+      # support needs is the big item back in the package list).
+      - name: Check the ISO size is sane
         run: |
-          limit=$((2 * 1024 * 1024 * 1024))
+          limit=$((3 * 1024 * 1024 * 1024))
           for f in out/*.iso; do
             size=$(stat -c%s "$f")
-            printf '%s: %s bytes (limit %s)\n' "$(basename "$f")" "$size" "$limit"
+            printf '%s: %s bytes (sanity cap %s)\n' "$(basename "$f")" "$size" "$limit"
             if (( size >= limit )); then
-              echo "::error::$(basename "$f") is $((size / 1048576)) MiB; GitHub rejects release assets of 2 GiB or more. Trim archiso/packages.x86_64 (firmware subpackages are the usual lever)."
+              echo "::error::$(basename "$f") is $((size / 1048576)) MiB - over the 3 GiB sanity cap. Trim archiso/packages.x86_64 (firmware subpackages are the usual lever)."
               exit 1
             fi
           done
@@ -395,11 +397,13 @@ jobs:
 
       - name: Check the ISO size is sane
         run: |
-          # The CUDA ISO intentionally exceeds GitHub's 2 GiB release-asset
+          # The CUDA ISO is expected to exceed GitHub's 2 GiB release-asset
           # limit (driver + CUDA runtime + kernels on top of the baked
-          # model); it ships as a workflow artifact and the release job
-          # links to it. 4 GiB is a sanity cap, not a product requirement: a
-          # build past it means something stopped being trimmed.
+          # model); the release job splits it into multi-part zip archives
+          # and attaches those. 4 GiB is a sanity cap, not a product
+          # requirement: a build past it means something stopped being
+          # trimmed - and is also past what Info-ZIP can put in a split
+          # archive, which the release job relies on.
           limit=$((4 * 1024 * 1024 * 1024))
           for f in out/*.iso; do
             size=$(stat -c%s "$f")
@@ -504,8 +508,12 @@ jobs:
 
   release:
     name: Publish release
-    needs: [version, x86_64, raspberrypi]
-    # Only tags publish, and only when both images actually built.
+    needs: [version, x86_64, raspberrypi, x86_64-cuda]
+    # Only tags publish, and only when all three images actually built. The
+    # CUDA build is the slow one (~1h20) and its image is part of the
+    # release, so the wait is deliberate: publishing while it still runs
+    # would attach an incomplete set, and a CUDA failure would block
+    # nothing at all.
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -513,37 +521,41 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          # The images (the standard ones guarded to stay under the 2 GiB
-          # per-file release-asset limit; the CUDA ISO is set aside below)
-          # plus the checksums and manifests. The lowercase-named mcp
-          # artifact does not match this pattern.
+          # The images plus the checksums and manifests. The lowercase-named
+          # mcp artifact does not match this pattern. Images at or past the
+          # 2 GiB asset limit are split into multi-part zips by the next
+          # step before anything is published.
           pattern: LiteAI-*
           path: artifacts
           merge-multiple: true
 
-      - name: Set aside the oversized CUDA ISO
-        id: cuda_iso
-        env:
-          VERSION: ${{ needs.version.outputs.version }}
+      - name: Split images past the release-asset limit
         run: |
           # GitHub rejects release assets of 2 GiB or more (HTTP 422 at
-          # upload time), and the CUDA ISO - driver, CUDA llama.cpp and the
-          # baked model on top of the standard image - is expected to exceed
-          # that. Park it outside the artifacts directory so the publish
-          # step cannot pick it up; the notes point at the workflow
-          # artifacts instead.
-          iso="artifacts/LiteAI-${VERSION}-x86_64-cuda.iso"
+          # upload time). The CUDA ISO crosses that by design (driver, CUDA
+          # llama.cpp and the baked model), and the standard x86_64 ISO does
+          # too since the amdgpu firmware its Vulkan build needs came back
+          # into the package list. Split those into multi-part zip volumes
+          # of 1900 MiB: each part stays under the limit and attaches as
+          # its own asset, and any archive tool that understands split zip
+          # archives reassembles the image (the release notes explain how).
+          # The .sha256 files keep checksumming the reassembled original.
+          #
+          # 4 GiB is the one hard ceiling: Info-ZIP 3.0 cannot put an entry
+          # larger than that into a split archive, so the image jobs' sanity
+          # caps stay in force.
           limit=$((2 * 1024 * 1024 * 1024))
-          if [[ -f "${iso}" ]] && (( $(stat -c%s "${iso}") >= limit )); then
-            mkdir -p too-big
-            mv "${iso}" too-big/
-            rm -f "artifacts/LiteAI-${VERSION}-x86_64-cuda.iso.sha256"
-            echo "state=too-big" >> "$GITHUB_OUTPUT"
-          elif [[ -f "${iso}" ]]; then
-            echo "state=attach" >> "$GITHUB_OUTPUT"
-          else
-            echo "state=absent" >> "$GITHUB_OUTPUT"
-          fi
+          shopt -s nullglob
+          for f in artifacts/*.iso artifacts/*.img.xz; do
+            size=$(stat -c%s "$f")
+            printf '%s: %s bytes\n' "${f##*/}" "$size"
+            if (( size < limit )); then continue; fi
+            base="${f##*/}"
+            stem="${base%.*}"
+            ( cd artifacts && zip -q -0 -s 1900m "${stem}.zip" "${base}" )
+            rm -f "$f"
+          done
+          ls -lh artifacts
 
       - name: Publish
         env:
@@ -559,22 +571,22 @@ jobs:
             gh release delete "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --yes
           fi
 
-          # The CUDA variant gets a table row when it fits a release asset,
-          # and a pointer at the workflow artifacts when it does not.
+          # Build the download table from what actually attached, so the
+          # notes can never promise a file the build did not produce.
           table='| Download | For |
-          | --- | --- |
-          | `LiteAI-'"${VERSION}"'-x86_64.iso` | PCs - UEFI (x64 and ia32) and legacy BIOS |
-          | `LiteAI-'"${VERSION}"'-aarch64-rpi.img.xz` | 64-bit Raspberry Pi - Pi 5, 4, 400, CM4, 3 and Zero 2 W |'
-          cuda_note=""
-          case "${{ steps.cuda_iso.outputs.state }}" in
-            attach)
-              table="${table}
-          | `LiteAI-'"${VERSION}"'-x86_64-cuda.iso` | PCs with an NVIDIA Turing (2016) or newer GPU - llama.cpp compiled for CUDA |"
-              ;;
-            *)
-              cuda_note="The CUDA variant of the PC image (NVIDIA Turing or newer, llama.cpp compiled for CUDA with GPU offload enabled by default) did not attach to this release - either it did not build, or, as usual, it was too large for a release asset. Download \`LiteAI-${VERSION}-x86_64-cuda.iso\` from the artifacts of the workflow run that produced this release (Actions -> Build images -> this run)."
-              ;;
-          esac
+          | --- | --- |'
+          if compgen -G "artifacts/LiteAI-${VERSION}-x86_64.iso*" >/dev/null; then
+            table="${table}
+          | \`LiteAI-'"${VERSION}"'-x86_64.iso\` | PCs - UEFI (x64 and ia32) and legacy BIOS; AMD/Intel GPUs offload via Vulkan, CPU otherwise |"
+          fi
+          if compgen -G "artifacts/LiteAI-${VERSION}-x86_64-cuda.iso*" >/dev/null; then
+            table="${table}
+          | \`LiteAI-'"${VERSION}"'-x86_64-cuda.iso\` | PCs with an NVIDIA Turing (2016) or newer GPU - llama.cpp compiled for CUDA |"
+          fi
+          if compgen -G "artifacts/LiteAI-${VERSION}-aarch64-rpi.img.xz*" >/dev/null; then
+            table="${table}
+          | \`LiteAI-'"${VERSION}"'-aarch64-rpi.img.xz\` | 64-bit Raspberry Pi - Pi 5, 4, 400, CM4, 3 and Zero 2 W |"
+          fi
 
           cat > release-notes.md <<EOF
           A minimal Arch Linux system that boots straight into **pi**, the coding
@@ -583,10 +595,31 @@ jobs:
 
           ${table}
 
-          The images carry the baked model and stay just under GitHub's 2 GiB
-          per-file release-asset limit; the \`.sha256\` files verify them.
+          The images carry the baked model. Files that fit GitHub's 2 GiB
+          per-file release-asset limit attach directly; anything larger
+          attaches as the split archive described below. The \`.sha256\`
+          files verify the reassembled images.
 
-          ${cuda_note}
+          ## Split archives
+
+          GitHub caps one release file at 2 GiB, so images at or past that
+          line are attached as a multi-part zip archive: parts named
+          \`.z01\`, \`.z02\`, ... plus a final \`.zip\`, all belonging to the
+          same image. Download **every** part into one folder before
+          extracting, then:
+
+          - **Windows**: 7-Zip or WinRAR (Windows Explorer cannot open split
+            archives) - right-click the \`.zip\` part and extract here.
+          - **Linux**: \`7z x LiteAI-${VERSION}-x86_64-cuda.zip\` (from the
+            \`p7zip-full\` package), or with Info-ZIP only:
+            \`zip -s 0 LiteAI-${VERSION}-x86_64-cuda.zip --out full.zip && unzip full.zip\`
+          - **macOS**: \`7z x LiteAI-${VERSION}-x86_64-cuda.zip\`
+            (\`brew install sevenzip\`) or The Unarchiver.
+
+          What comes out is the original \`.iso\`; verify it with
+          \`sha256sum -c LiteAI-${VERSION}-x86_64-cuda.iso.sha256\` (or the
+          matching \`.sha256\` file of whichever image you downloaded) and
+          continue below.
 
           ## PCs
 
@@ -599,7 +632,10 @@ jobs:
           \`\`\`
 
           Boot it and pi comes up on its own against the local model; nothing
-          touches the disk until you run \`sudo liteai-install\`.
+          touches the disk until you run \`sudo liteai-install\`. On a machine
+          with an AMD or Intel GPU the model server offloads to it (Vulkan);
+          machines with no usable GPU infer on the CPU. NVIDIA cards want the
+          CUDA ISO above.
 
           ## Raspberry Pi
 
@@ -623,14 +659,16 @@ jobs:
 
           ## What is inside
 
-          llama.cpp (prebuilt upstream CPU binary; the CUDA ISO builds the
-          same pin from source with CUDA enabled), pi
+          llama.cpp (prebuilt upstream Vulkan binary in the PC ISO - AMD/Intel
+          GPU offload with CPU fallback; the CUDA ISO builds the same pin from
+          source with CUDA enabled; the Pi image ships the CPU build), pi
           (\`@earendil-works/pi-coding-agent\`),
           the baked \`qwen2.5-coder-1.5b-instruct-q4_k_m\` model, and the LiteAI
           MCP server that lets pi manage llama.cpp, its models, itself and the
-          machine. Both images are built from the current Arch Linux (and Arch
-          Linux ARM) repositories on the day they are built; the \`.packages.txt\`
-          file beside each image lists exactly what that build shipped.
+          machine. All images are built from the current Arch Linux (and Arch
+          Linux ARM) repositories on the day they are built; the
+          \`.packages.txt\` file beside each image lists exactly what that
+          build shipped.
           EOF
 
           gh release create "${GITHUB_REF_NAME}" \

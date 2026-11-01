@@ -87,6 +87,19 @@ verify_image() {
 
     [[ -x "${prefix}/bin/llama-server" ]] || die "missing ${prefix}/bin/llama-server"
 
+    # The seven-architecture fatbin is the biggest single staged file and the
+    # one a silent profile-copy loss actually ate once - check it by size,
+    # not just llama-server.
+    fatbin="$(find "${prefix}/lib" -maxdepth 1 -name 'libggml-cuda.so.*' -size +100M -print -quit)"
+    [[ -n "${fatbin}" ]] ||
+        { echo "  libggml-cuda.so is missing or suspiciously small" >&2; fails=1; }
+
+    # And the rest of the staged payload that travels beside it.
+    compgen -G "${AIROOTFS}/var/lib/liteai/models/*.gguf" >/dev/null ||
+        { echo "  missing the baked model" >&2; fails=1; }
+    [[ -x "${AIROOTFS}/usr/local/bin/pi" ]] ||
+        { echo "  missing /usr/local/bin/pi" >&2; fails=1; }
+
     # The driver side of the stack, all of it installed by the image's own
     # packages during mkarchiso.
     for entry in \

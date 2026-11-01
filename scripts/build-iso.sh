@@ -104,7 +104,10 @@ readonly -a NVIDIA_TRIM=(
     usr/lib/libnvidia-glvkspirv.so*
     usr/lib/libnvidia-rtcore.so*
     usr/lib/libnvoptix.so*
-    usr/lib/libnvidia-gpucomp.so*
+    # libnvidia-gpucomp stays: it is the driver's shader-compiler core, and
+    # keeping it is cheap insurance for the CUDA JIT path the image depends
+    # on (verify checks libcuda/ptxjitcompiler's dependencies; a missing one
+    # here would fail the build late).
     # GBM/VDPAU display and video-surface paths
     usr/lib/nvidia-drm_gbm.so
     usr/lib/libvdpau_nvidia.so*
@@ -293,8 +296,11 @@ mkarchiso -v -w "${WORK_DIR}/mkarchiso" -o "${OUT_DIR}" "${PROFILE}"
 # ran (nvidia-utils only lands inside mkarchiso); verify the finished root
 # while it is still on disk.
 if [[ "${VARIANT}" == "cuda" ]]; then
-    image_root="$(find "${WORK_DIR}" -type d -path '*/airootfs/var/lib/pacman' -printf '%h\n' | head -1)"
-    if [[ -n "${image_root}" ]]; then
+    # The pacman database marks the finished root; %p (not %h) is the match
+    # itself, and the image root is that path minus the db suffix.
+    pkgdb="$(find "${WORK_DIR}" -type d -path '*/airootfs/var/lib/pacman' -print -quit)"
+    image_root="${pkgdb%/var/lib/pacman}"
+    if [[ -n "${pkgdb}" ]]; then
         "${REPO_ROOT}/scripts/build-llamacpp-cuda.sh" --verify "${image_root}"
     else
         msg "warning: could not locate the built airootfs - skipping CUDA verification"

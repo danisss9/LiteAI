@@ -18,6 +18,7 @@ pacman_conf="pacman.conf"
 airootfs_image_type="squashfs"
 airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xdict-size' '1M')
 bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--long' '-19')
+# build-iso.sh appends an entry for every executable in the staged airootfs.
 file_permissions=(
   ["/etc/gshadow"]="0:0:0400"
   ["/etc/shadow"]="0:0:0400"

@@ -85,11 +85,12 @@ verify_image() {
     local prefix="${AIROOTFS}/opt/llama.cpp" fails=0 entry elf
     msg "verifying the built CUDA image root in ${AIROOTFS}"
 
-    [[ -x "${prefix}/bin/llama-server" ]] || die "missing ${prefix}/bin/llama-server"
+    [[ -x "${prefix}/bin/llama-server" ]] ||
+        die "${prefix}/bin/llama-server is missing or not executable"
 
-    # The seven-architecture fatbin is the biggest single staged file and the
-    # one a silent profile-copy loss actually ate once - check it by size,
-    # not just llama-server.
+    # The seven-architecture fatbin is the biggest single staged file, so
+    # check it by size: a truncated or absent copy would otherwise only show
+    # up as a GPU-less llama-server on the booted image.
     fatbin="$(find "${prefix}/lib" -maxdepth 1 -name 'libggml-cuda.so.*' -size +100M -print -quit)"
     [[ -n "${fatbin}" ]] ||
         { echo "  libggml-cuda.so is missing or suspiciously small" >&2; fails=1; }
@@ -98,7 +99,7 @@ verify_image() {
     compgen -G "${AIROOTFS}/var/lib/liteai/models/*.gguf" >/dev/null ||
         { echo "  missing the baked model" >&2; fails=1; }
     [[ -x "${AIROOTFS}/usr/local/bin/pi" ]] ||
-        { echo "  missing /usr/local/bin/pi" >&2; fails=1; }
+        { echo "  /usr/local/bin/pi is missing or not executable" >&2; fails=1; }
 
     # The driver side of the stack, all of it installed by the image's own
     # packages during mkarchiso.
